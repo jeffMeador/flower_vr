@@ -7,3 +7,4 @@ build/
 *.log
 tools/build/
 tools/scan_output.txt
+thirdparty/minhook/build/

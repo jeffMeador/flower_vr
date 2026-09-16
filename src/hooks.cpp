@@ -1,5 +1,6 @@
 #include "hooks.h"
 #include "log.h"
+#include "capture.h"
 #include <cstdio>
 #include <atomic>
 #include <vector>
@@ -118,6 +119,7 @@ static void DumpBackbufferBMP(IDXGISwapChain* swapChain, uint64_t frameIndex)
 static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 {
     uint64_t frame = g_frameCount.fetch_add(1);
+    NotifyCaptureFrameBoundary();
 
     if (frame == 0)
         Log("First Present() call received - hook is live.");
@@ -129,7 +131,7 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
     return g_realPresent(This, SyncInterval, Flags);
 }
 
-void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* /*device*/, ID3D11DeviceContext* /*context*/)
+void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* device, ID3D11DeviceContext* context)
 {
     if (!swapChain) return;
     void** vtable = *reinterpret_cast<void***>(swapChain);
@@ -143,4 +145,6 @@ void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* /*device*/
         VirtualProtect(&vtable[8], sizeof(void*), oldProtect, &oldProtect);
         Log("Present() vtable slot [8] patched.");
     }
+
+    InstallCaptureHooks(device, context);
 }

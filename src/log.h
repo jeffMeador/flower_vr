@@ -2,6 +2,7 @@
 #include <Windows.h>
 #include <cstdio>
 #include <cstdarg>
+#include <share.h>
 
 inline FILE* g_logFile = nullptr;
 
@@ -9,7 +10,8 @@ inline void LogInit(const wchar_t* dllDir)
 {
     wchar_t path[MAX_PATH];
     swprintf_s(path, L"%s\\vrmod.log", dllDir);
-    _wfopen_s(&g_logFile, path, L"w");
+    // _SH_DENYNO: allow other processes (us, tailing it) to read while the game holds it open.
+    g_logFile = _wfsopen(path, L"w", _SH_DENYNO);
 }
 
 inline void Log(const char* fmt, ...)
