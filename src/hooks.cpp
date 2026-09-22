@@ -24,7 +24,7 @@ void SetHooksDllDir(const wchar_t* dir)
 }
 
 // Minimal 32bpp BMP writer for verifying frames visually without extra deps.
-static void DumpBackbufferBMP(IDXGISwapChain* swapChain, uint64_t frameIndex)
+static void DumpBackbufferBMP(IDXGISwapChain* swapChain, uint64_t frameIndex, bool rightEyeTwin = false)
 {
     ID3D11Device* device = nullptr;
     if (FAILED(swapChain->GetDevice(__uuidof(ID3D11Device), (void**)&device)) || !device)
@@ -39,6 +39,15 @@ static void DumpBackbufferBMP(IDXGISwapChain* swapChain, uint64_t frameIndex)
         if (ctx) ctx->Release();
         device->Release();
         return;
+    }
+
+    if (rightEyeTwin)
+    {
+        // Double render: the right eye lives in the backbuffer's twin.
+        ID3D11Texture2D* twin = (ID3D11Texture2D*)ShadowOfResource(backbuffer);
+        backbuffer->Release();
+        backbuffer = twin;
+        if (!backbuffer) { if (ctx) ctx->Release(); device->Release(); return; }
     }
 
     D3D11_TEXTURE2D_DESC desc = {};
@@ -68,7 +77,7 @@ static void DumpBackbufferBMP(IDXGISwapChain* swapChain, uint64_t frameIndex)
         std::vector<unsigned char> row(w * 3);
 
         wchar_t path[MAX_PATH];
-        swprintf_s(path, L"%s\\frame_%llu.bmp", g_dllDir, (unsigned long long)frameIndex);
+        swprintf_s(path, L"%s\\frame_%llu%s.bmp", g_dllDir, (unsigned long long)frameIndex, rightEyeTwin ? L"_R" : L"");
         FILE* f = nullptr;
         _wfopen_s(&f, path, L"wb");
         if (f)
@@ -113,7 +122,7 @@ static void DumpBackbufferBMP(IDXGISwapChain* swapChain, uint64_t frameIndex)
                 fwrite(padded.data(), 1, rowSize, f);
             }
             fclose(f);
-            Log("Dumped screenshot: frame_%llu.bmp (%ux%u, fmt=%d)", (unsigned long long)frameIndex, w, h, (int)desc.Format);
+            Log("Dumped screenshot: frame_%llu%s.bmp (%ux%u, fmt=%d)", (unsigned long long)frameIndex, rightEyeTwin ? "_R" : "", w, h, (int)desc.Format);
         }
         ctx->Unmap(staging, 0);
     }
@@ -150,6 +159,7 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
     if (frame < 2 || dumpRemaining > 0)
     {
         DumpBackbufferBMP(This, frame);
+        if (Stereo().doubleRender) DumpBackbufferBMP(This, frame, true);
         if (dumpRemaining > 0) dumpRemaining--;
     }
 
