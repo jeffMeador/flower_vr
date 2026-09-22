@@ -177,8 +177,22 @@ bool StereoTakeHeadForCamera(const float* cam, float rot[9], float pos[3])
         Log("[stereo] engine camera axes vs screen: x.right=%.3f y.up=%.3f z.fwd=%.3f", dx, dy, dz);
 
     // OpenXR pose is x right / y up / z back. If the engine camera's z points
-    // forward, flip z (conjugate by diag(1,1,-1)).
-    const float s[3] = { 1, 1, dz > 0 ? -1.0f : 1.0f };
+    // forward, flip z (conjugate by diag(1,1,-1)). Decide this ONCE: the
+    // screen axes come from the previous frame, which already includes the
+    // head turn, so beyond +/-90 deg of yaw the dot product changes sign and
+    // re-deciding every frame mirrored horizontal tracking.
+    static int zSign = 0;
+    if (zSign == 0 && fabsf(dz) > 0.9f)
+    {
+        zSign = dz > 0 ? -1 : 1;
+        Log("[stereo] engine camera z axis points %s; locked", zSign < 0 ? "forward (flipping)" : "back (OpenXR-like)");
+    }
+    if (zSign == 0)
+    {
+        StereoHeadNotApplied(); // not decided yet: leave the camera alone this frame
+        return false;
+    }
+    const float s[3] = { 1, 1, (float)zSign };
     for (int i = 0; i < 3; ++i)
     {
         for (int j = 0; j < 3; ++j) rot[i * 3 + j] = s[i] * h.rot[i * 3 + j] * s[j];
