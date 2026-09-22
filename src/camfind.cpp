@@ -4,6 +4,7 @@
 #include <TlHelp32.h>
 #include <cmath>
 #include <cstring>
+#include <cstdio>
 
 // Debug tool (F7): locate the engine's perspective-camera block
 // {fov_deg, near, far, aspect} by value, then watch the fov float with a
@@ -15,6 +16,8 @@ static const float kNear = 0.1f, kFar = 1330.5f;
 static volatile LONG g_ripCount = 0;
 static void* g_rips[32];
 static volatile LONG g_ripHits[32];
+static volatile LONG g_seqCount = 0;
+static unsigned char g_seq[96]; // order of hits by distinct-RIP index
 static void* g_watchAddr = nullptr;
 static PVOID g_veh = nullptr;
 static DWORD g_disarmAt = 0;
@@ -30,6 +33,8 @@ static LONG WINAPI Handler(EXCEPTION_POINTERS* info)
     for (; i < n; ++i) if (g_rips[i] == rip) break;
     if (i == n && n < 32) { g_rips[n] = rip; InterlockedIncrement(&g_ripCount); }
     if (i < 32) InterlockedIncrement(&g_ripHits[i]);
+    LONG sq = InterlockedIncrement(&g_seqCount) - 1;
+    if (sq < 96) g_seq[sq] = (unsigned char)i;
     ctx->Dr6 = 0;
     return EXCEPTION_CONTINUE_EXECUTION;
 }
@@ -140,22 +145,50 @@ static float* FindCamera(float aspect)
     return best;
 }
 
+#include "camoverride.h"
+
+static void StartWatch(void* addr, const char* what)
+{
+    g_watchAddr = addr;
+    g_ripCount = 0;
+    g_seqCount = 0;
+    for (auto& h : g_ripHits) h = 0;
+    if (!g_veh) g_veh = AddVectoredExceptionHandler(1, Handler);
+    Log("[camfind] watching %s at %p (present thread %lu)", what, addr, GetCurrentThreadId());
+    SetWatch(addr, true);
+    g_disarmAt = GetTickCount() + 2000;
+}
+
 void CamFindTick(float backbufferAspect)
 {
+    if (g_disarmAt) { LONG sq = InterlockedIncrement(&g_seqCount) - 1; if (sq < 96) g_seq[sq] = 99; } // 99 = Present
     if (g_disarmAt && GetTickCount() >= g_disarmAt)
     {
         g_disarmAt = 0;
         SetWatch(nullptr, false);
         Log("[camfind] %ld distinct instruction(s) touched fov at %p:", g_ripCount, g_watchAddr);
-        for (LONG i = 0; i < g_ripCount; ++i) LogRip(g_rips[i], g_ripHits[i]);
+        for (LONG i = 0; i < g_ripCount; ++i) { Log("[camfind]  #%ld:", i); LogRip(g_rips[i], g_ripHits[i]); }
+        char buf[400] = {}; size_t n = 0;
+        for (LONG k = 0; k < g_seqCount && k < 96; ++k) n += sprintf_s(buf + n, sizeof(buf) - n, "%d ", g_seq[k]);
+        Log("[camfind] hit order (first 96): %s", buf);
+        Log("[camfind] (99 = Present)");
         return;
     }
-    if (!(GetAsyncKeyState(VK_F7) & 1) || g_disarmAt) return;
+    if (g_disarmAt) return;
+    if (GetAsyncKeyState(VK_F4) & 1)
+    {
+        // F4: who reads/writes the render camera matrix (x axis at node+0x90)?
+        void* node = CamOverrideCameraNode();
+        if (node) StartWatch((char*)node + 0x90, "camera matrix");
+        return;
+    }
+    if (!(GetAsyncKeyState(VK_F7) & 1)) return;
 
     float* cam = FindCamera(backbufferAspect);
     if (!cam) return;
     g_watchAddr = cam;
     g_ripCount = 0;
+    g_seqCount = 0;
     for (auto& h : g_ripHits) h = 0;
     if (!g_veh) g_veh = AddVectoredExceptionHandler(1, Handler);
     SetWatch(cam, true);

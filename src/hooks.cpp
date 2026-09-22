@@ -177,5 +177,6 @@ void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* device, ID
         swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
         GetPrivateProfileStringW(L"xr", L"gameFov", L"125", buf, 32, ini);
         CamOverrideInstall((float)_wtof(buf));
+        CamOverrideSetHeadCamera(GetPrivateProfileIntW(L"xr", L"headCamera", 0, ini) != 0);
     }
 }

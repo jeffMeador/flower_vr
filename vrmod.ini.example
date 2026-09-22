@@ -6,3 +6,7 @@ shiftEyePosition=0
 [debug]
 fakepad=1
 
+
+[xr]
+headCamera=1
+

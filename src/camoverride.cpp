@@ -39,6 +39,81 @@ struct Ctl
 static Ctl* g_ctl = nullptr;
 static float g_wantFov = 125.0f;
 static bool g_installed = false;
+static bool g_headCamera = false; // [xr] headCamera: turn engine camera with the head
+
+// Gameplay must keep seeing the un-turned camera: the steering code converts
+// stick input to a world direction with it (Flower.exe+0x10B30F..0x10B32B,
+// found with camfind F4 - it only runs while there is input). Turning it by
+// the head reversed the controls and fed back into the chase camera (spin).
+// Two hardware execute breakpoints on the game thread swap the original
+// matrix in for exactly those four loads and the head-turned one back after.
+static const uintptr_t kSteerStartRva = 0x10B30F; // movups xmm6,[rcx+90h]
+static const uintptr_t kSteerEndRva = 0x10B32B;   // lea rcx,[rsp+70h]
+static const uint8_t kSteerStartBytes[7] = { 0x0F, 0x10, 0xB1, 0x90, 0x00, 0x00, 0x00 };
+static const uint8_t kSteerEndBytes[5] = { 0x48, 0x8D, 0x4C, 0x24, 0x70 };
+
+static float* g_camMatrix = nullptr;       // node+0x90 of the camera we turned
+static float g_origMatrix[16], g_headMatrix[16];
+static volatile LONG g_steerSwaps = 0;
+
+static LONG WINAPI SteerBreakpointHandler(EXCEPTION_POINTERS* info)
+{
+    if (info->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP) return EXCEPTION_CONTINUE_SEARCH;
+    PCONTEXT ctx = info->ContextRecord;
+    if (!(ctx->Dr6 & 0x6)) return EXCEPTION_CONTINUE_SEARCH; // DR1 / DR2
+    if (g_camMatrix)
+    {
+        if (ctx->Dr6 & 0x2) { memcpy(g_camMatrix, g_origMatrix, 64); InterlockedIncrement(&g_steerSwaps); }
+        if (ctx->Dr6 & 0x4) memcpy(g_camMatrix, g_headMatrix, 64);
+    }
+    ctx->Dr6 = 0;
+    ctx->EFlags |= 0x10000; // RF: resume past the execute breakpoint
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+static DWORD WINAPI ArmSteerBreakpoints(LPVOID threadIdPtr)
+{
+    DWORD tid = (DWORD)(uintptr_t)threadIdPtr;
+    uint8_t* base = (uint8_t*)GetModuleHandleW(nullptr);
+    HANDLE h = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, tid);
+    if (!h) return 0;
+    if (SuspendThread(h) != (DWORD)-1)
+    {
+        CONTEXT c = {};
+        c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+        if (GetThreadContext(h, &c))
+        {
+            c.Dr1 = (DWORD64)(base + kSteerStartRva);
+            c.Dr2 = (DWORD64)(base + kSteerEndRva);
+            c.Dr7 &= ~((DWORD64)0xFF << 20);    // RW1/LEN1/RW2/LEN2 = 0: execute, 1 byte
+            c.Dr7 |= (1ull << 2) | (1ull << 4); // L1, L2
+            SetThreadContext(h, &c);
+        }
+        ResumeThread(h);
+    }
+    CloseHandle(h);
+    Log("[camoverride] steering breakpoints armed on thread %lu", tid);
+    return 0;
+}
+
+static void EnsureSteerBreakpoints()
+{
+    static bool done = false;
+    if (done) return;
+    done = true;
+    uint8_t* base = (uint8_t*)GetModuleHandleW(nullptr);
+    if (memcmp(base + kSteerStartRva, kSteerStartBytes, sizeof(kSteerStartBytes)) != 0 ||
+        memcmp(base + kSteerEndRva, kSteerEndBytes, sizeof(kSteerEndBytes)) != 0)
+    {
+        Log("[camoverride] steering code bytes differ (different build?); head camera would break steering");
+        return;
+    }
+    AddVectoredExceptionHandler(1, SteerBreakpointHandler);
+    // We're on the game thread; a helper thread must suspend it to set its
+    // debug registers. Don't wait (it has to suspend us).
+    HANDLE t = CreateThread(nullptr, 0, ArmSteerBreakpoints, (LPVOID)(uintptr_t)GetCurrentThreadId(), 0, nullptr);
+    if (t) CloseHandle(t);
+}
 
 // Runs on the engine's camera update, right after it writes the render
 // camera's matrix (node+0x90: x axis, y axis, z axis, position as float4s)
@@ -52,11 +127,14 @@ static void OnCameraUpdate(uint8_t* node, uint8_t* wrapper)
         firstThread = GetCurrentThreadId();
         Log("[camoverride] camera update runs on thread %lu", firstThread);
     }
-    if (!g_ctl || !g_ctl->enabled || !node) { StereoHeadNotApplied(); return; }
+    g_camMatrix = nullptr; // no swaps unless we turn the camera this frame
+    if (!g_ctl || !g_ctl->enabled || !g_headCamera || !node) { StereoHeadNotApplied(); return; }
 
     float* m = (float*)(node + 0x90);
     float R[9], t[3];
     if (!StereoTakeHeadForCamera(m, R, t)) return;
+    EnsureSteerBreakpoints();
+    memcpy(g_origMatrix, m, 64);
 
     float e[3][4], pos[4];
     memcpy(e, m, sizeof(e));
@@ -66,10 +144,23 @@ static void OnCameraUpdate(uint8_t* node, uint8_t* wrapper)
             m[j * 4 + k] = e[0][k] * R[0 * 3 + j] + e[1][k] * R[1 * 3 + j] + e[2][k] * R[2 * 3 + j];
     for (int k = 0; k < 3; ++k)
         m[12 + k] = pos[k] + e[0][k] * t[0] + e[1][k] * t[1] + e[2][k] * t[2];
+    memcpy(g_headMatrix, m, 64);
+    g_camMatrix = m;
+
+    static DWORD lastLog = 0;
+    if (GetTickCount() - lastLog > 10000)
+    {
+        lastLog = GetTickCount();
+        Log("[camoverride] head camera active; steering reads given original camera %ld times so far", g_steerSwaps);
+    }
 }
 
 static void Emit(uint8_t*& p, std::initializer_list<uint8_t> bytes) { for (uint8_t b : bytes) *p++ = b; }
 static void Emit64(uint8_t*& p, uint64_t v) { memcpy(p, &v, 8); p += 8; }
+
+void* CamOverrideCameraNode() { return g_ctl ? g_ctl->camera : nullptr; }
+
+void CamOverrideSetHeadCamera(bool on) { g_headCamera = on; }
 
 bool CamOverrideInstall(float fovDegrees)
 {
@@ -146,6 +237,11 @@ bool CamOverrideInstall(float fovDegrees)
 void CamOverrideTick(bool enable)
 {
     if (!g_installed) return;
+    if (GetAsyncKeyState(VK_F3) & 1)
+    {
+        g_headCamera = !g_headCamera;
+        Log("[camoverride] F3: head camera = %d", g_headCamera);
+    }
     g_ctl->enabled = enable ? 1 : 0;
     uint8_t* cam = g_ctl->camera;
     if (!cam) return;
