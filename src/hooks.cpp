@@ -4,8 +4,10 @@
 #include "fakepad.h"
 #include "stereo.h"
 #include "xr.h"
+#include "stereo.h"
 #include "camfind.h"
 #include "camoverride.h"
+#include "shadow.h"
 #include <cstdio>
 #include <atomic>
 #include <vector>
@@ -125,7 +127,9 @@ static void DumpBackbufferBMP(IDXGISwapChain* swapChain, uint64_t frameIndex)
 static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 {
     uint64_t frame = g_frameCount.fetch_add(1);
-    int renderedEye = StereoCurrentEye(); // eye this finished frame was drawn for
+    // Eye this finished frame was drawn for (2 = both: double render).
+    int renderedEye = Stereo().doubleRender ? 2 : StereoCurrentEye();
+    ShadowBypass bypass; // our own context calls below must not be mirrored
     XrSubmitFrame(This, renderedEye);
     CamOverrideTick(XrSessionActive());
     {
@@ -170,6 +174,7 @@ void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* device, ID
     }
 
     InstallCaptureHooks(device, context);
+    ShadowInstall(device, context, Stereo().doubleRender);
     InstallFakePad(g_dllDir);
     XrInit(device, g_dllDir);
     {

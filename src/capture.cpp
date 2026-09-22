@@ -2,6 +2,7 @@
 #include "log.h"
 #include "mat4.h"
 #include "stereo.h"
+#include "shadow.h"
 #include <MinHook.h>
 #include <d3d11shader.h>
 #include <d3dcompiler.h>
@@ -253,9 +254,10 @@ static void STDMETHODCALLTYPE Hook_Unmap(ID3D11DeviceContext* self, ID3D11Resour
 static void STDMETHODCALLTYPE Hook_UpdateSubresource(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub, const D3D11_BOX* box, const void* src, UINT rowPitch, UINT depthPitch)
 {
     g_countUpdateSubresource++;
-    if (dstSub == 0)
+    if (dstSub == 0 && !ShadowBypassed())
         RecordGameWrite(dst, box ? nullptr : src); // partial updates: can't mirror, mark invalid
     g_realUpdateSubresource(self, dst, dstSub, box, src, rowPitch, depthPitch);
+    ShadowOnUpdateSubresource(self, dst, dstSub, box, src, rowPitch, depthPitch);
 }
 
 static void WriteBuffer(ID3D11DeviceContext* ctx, ID3D11Resource* buf, const BufferShadow& s, const void* data)
@@ -366,31 +368,50 @@ static void PrepareDraw(ID3D11DeviceContext* self)
     s.patchedKey = key;
     g_statPatched++;
 }
+// Issue one game draw: patched for the current eye (alternate-eye mode), or
+// twice - left eye into the game's targets, right eye into their twins.
+template <class F>
+static void StereoDraw(ID3D11DeviceContext* self, F&& draw)
+{
+    if (!Stereo().doubleRender || ShadowBypassed())
+    {
+        PrepareDraw(self);
+        draw();
+        return;
+    }
+    StereoSetRenderEye(0);
+    PrepareDraw(self);
+    draw();
+    if (ShadowBindRightEye(self))
+    {
+        StereoSetRenderEye(1);
+        PrepareDraw(self);
+        draw();
+        ShadowRestore(self);
+        StereoSetRenderEye(0);
+    }
+}
+
 static void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* self, UINT count, UINT start, INT base)
 {
     g_countDrawIndexed++;
-    PrepareDraw(self);
-    g_realDrawIndexed(self, count, start, base);
+    StereoDraw(self, [&] { g_realDrawIndexed(self, count, start, base); });
 }
 static void STDMETHODCALLTYPE Hook_Draw(ID3D11DeviceContext* self, UINT count, UINT start)
 {
     g_countDraw++;
-    PrepareDraw(self);
-    g_realDraw(self, count, start);
+    StereoDraw(self, [&] { g_realDraw(self, count, start); });
 }
 static void STDMETHODCALLTYPE Hook_DrawIndexedInstanced(ID3D11DeviceContext* self, UINT ipc, UINT ic, UINT sil, INT bvl, UINT sii)
 {
     g_countDrawIndexedInstanced++;
-    PrepareDraw(self);
-    g_realDrawIndexedInstanced(self, ipc, ic, sil, bvl, sii);
+    StereoDraw(self, [&] { g_realDrawIndexedInstanced(self, ipc, ic, sil, bvl, sii); });
 }
 static void STDMETHODCALLTYPE Hook_DrawInstanced(ID3D11DeviceContext* self, UINT vpi, UINT ic, UINT sv, UINT si)
 {
     g_countDrawInstanced++;
-    PrepareDraw(self);
-    g_realDrawInstanced(self, vpi, ic, sv, si);
+    StereoDraw(self, [&] { g_realDrawInstanced(self, vpi, ic, sv, si); });
 }
-
 void NotifyCaptureFrameBoundary()
 {
     uint64_t f = g_captureFrame.fetch_add(1);
@@ -415,6 +436,7 @@ void NotifyCaptureFrameBoundary()
             (unsigned long long)g_statNoShadow, (unsigned long long)g_statOrtho, (unsigned long long)g_statNoVars,
             (unsigned long long)g_mapTypeCount[D3D11_MAP_WRITE], (unsigned long long)g_mapTypeCount[D3D11_MAP_READ_WRITE],
             (unsigned long long)g_mapTypeCount[D3D11_MAP_WRITE_DISCARD], (unsigned long long)g_mapTypeCount[D3D11_MAP_WRITE_NO_OVERWRITE]);
+        ShadowLogStats();
     }
 }
 

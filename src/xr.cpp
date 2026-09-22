@@ -1,6 +1,7 @@
 #include "xr.h"
 #include "log.h"
 #include "stereo.h"
+#include "shadow.h"
 #include <Windows.h>
 #include <cmath>
 #include <cstdio>
@@ -58,6 +59,7 @@ static EyeSwapchain g_eyes[2];
 static UINT g_size = 0;                 // square swapchain edge, pixels
 static DXGI_FORMAT g_format = DXGI_FORMAT_UNKNOWN;
 static ID3D11Texture2D* g_resolve = nullptr; // for MSAA backbuffers
+static ID3D11Texture2D* g_resolveRight = nullptr;
 static uint64_t g_submitted = 0;
 
 static const char* ResultStr(XrResult r)
@@ -253,6 +255,7 @@ static bool CreateSession(IDXGISwapChain* gameSwapChain)
         rd.SampleDesc.Count = 1; rd.SampleDesc.Quality = 0;
         rd.BindFlags = 0; rd.MiscFlags = 0;
         g_device->CreateTexture2D(&rd, nullptr, &g_resolve);
+        g_device->CreateTexture2D(&rd, nullptr, &g_resolveRight);
     }
 
     Log("[xr] session created, waiting for READY");
@@ -402,6 +405,26 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
             ctx->ResolveSubresource(g_resolve, 0, bb, 0, desc.Format);
             src = g_resolve;
         }
+        if (renderedEye == 2)
+        {
+            // Double render: left eye in the backbuffer, right eye in its twin.
+            ID3D11Resource* twin = ShadowOfResource(bb);
+            ID3D11Texture2D* twinSrc = (ID3D11Texture2D*)twin;
+            if (twin && g_resolve)
+            {
+                ctx->ResolveSubresource(g_resolveRight ? g_resolveRight : g_resolve, 0, twin, 0, desc.Format);
+                twinSrc = g_resolveRight ? g_resolveRight : g_resolve;
+            }
+            CopyToEye(0, ctx, src, desc);
+            if (twinSrc) CopyToEye(1, ctx, twinSrc, desc);
+            if (twin) twin->Release();
+            if (g_givenValid && twinSrc)
+            {
+                g_imagePose[0] = g_givenPose[0]; g_imagePose[1] = g_givenPose[1];
+                g_imagePoseValid[0] = g_imagePoseValid[1] = true;
+            }
+        }
+        else
         for (int e = 0; e < 2; ++e)
         {
             if ((e == 0 && renderedEye > 0) || (e == 1 && renderedEye < 0)) continue;
