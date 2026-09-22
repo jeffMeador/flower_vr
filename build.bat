@@ -13,10 +13,10 @@ if not exist build mkdir build
 
 cl.exe /nologo /EHsc /MT /std:c++17 /W3 ^
   /I thirdparty\minhook\include ^
-  src\dllmain.cpp src\proxy_exports.cpp src\hooks.cpp src\capture.cpp ^
+  src\dllmain.cpp src\proxy_exports.cpp src\hooks.cpp src\capture.cpp src\stereo.cpp src\fakepad.cpp ^
   thirdparty\minhook\src\buffer.c thirdparty\minhook\src\hook.c thirdparty\minhook\src\trampoline.c thirdparty\minhook\src\hde\hde64.c ^
   /LD /Fe:build\d3d11.dll /Fo:build\ ^
-  /link /DEF:src\d3d11_proxy.def d3dcompiler.lib dxguid.lib /OUT:build\d3d11.dll
+  /link /DEF:src\d3d11_proxy.def d3dcompiler.lib dxguid.lib user32.lib xinput9_1_0.lib /OUT:build\d3d11.dll
 
 if errorlevel 1 (
   echo Build FAILED

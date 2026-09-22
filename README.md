@@ -24,40 +24,37 @@ source available or needed). See git log for phase-by-phase history.
   premultiplied `modelviewproj` in the same per-object cbuffer (slot 0 "UL").
   Particle/UI/text shaders only upload the premultiplied MVP.
 
-## The math (planned, not yet implemented at runtime)
+## The math (implemented, Phase 2a)
 
-Per draw call, engine computes `MVP = Model * View * Proj` (row-vector
-convention). Since we have both `Model` and `MVP` for scene geometry:
-
-```
-ViewProj_mono = inverse(Model) * MVP      // recoverable per draw call
-```
-
-This should be IDENTICAL across every draw call in a given frame (single
-shared camera) — first thing to verify once we hook this at runtime.
-
-Camera FOV is already known and data-driven — `Data/Scripts/CameraInit.lua`
-calls `camKeyPtr:fov(v.Fov)` per keyframe — so we can reconstruct `Proj_mono`
-independently from a standard perspective-projection formula (fov, aspect,
-near, far) rather than trying to decompose it out of the product. Then:
+**Convention correction (Phase 2a):** Flower's cbuffers use the
+*column-vector* convention — `clip = MVP * v`, matrices stored row-major, so
+translation lives in column 3 (`m[i][3]`) and `clip.w` comes from row 3. The
+Phase 1 notes below assumed row vectors; that was wrong, and the Phase 1
+"recovered ViewProj" (`inverse(Model) * MVP`) was the wrong product (it looked
+stable only because it was consistent garbage). Correct:
 
 ```
-View_mono = ViewProj_mono * inverse(Proj_mono_reconstructed)
+MVP = Proj * View * Model
+ViewProj_mono = MVP * inverse(Model)      // per draw call that exposes `model`
 ```
 
-`View_mono` gives us the actual camera position/orientation. From there, per
-eye:
+Sanity check from live data: row 3 of the recovered VP (the w row) has
+upper-3 length exactly 1.0000, and `|row1| / |row0|` = 3.5556 = 7680/2160.
+
+Per-eye shift, no need to reconstruct Proj or View explicitly: translating
+the view by `dx` along view-space X (`T * View`) with a symmetric projection
+(`Proj` column 0 = `(xs, 0, 0, 0)`) gives
 
 ```
-View_eye = eye_offset(View_mono, ±IPD/2)   // translate along camera local X
-Proj_eye = perspective(eye_fov, aspect, near, far)   // from OpenXR later
-MVP_eye  = Model * View_eye * Proj_eye
+MVP_eye = MVP + (dx * xs) in element [0][3]        // xs = |VP row0 upper3|
+modelView_eye[0][3] += dx
 ```
 
-Every draw call gets rendered twice (once per eye, with the corresponding
-`MVP_eye` substituted into its cbuffer before the real `Draw`/`DrawIndexed`
-call goes through), targeting two separate render targets.
-
+— a constant clip-space X offset, i.e. parallax proportional to `1/w`.
+Applied to `modelViewProj`, `oldModelViewProj` (motion blur),
+`viewprojection`/`viewProjMtx` (perspective only) and `modelView`. Matrices
+with no perspective (w row = 0,0,0,1: UI, text, fullscreen passes) are
+skipped automatically.
 ## Particles/petals/grass — the actual bulk of what's on screen
 
 Checked explicitly because it's easy to hand-wave: `PetalSwarm_vs`,
@@ -143,13 +140,43 @@ be a red herring for the *real* bug above (same freeze reproduced with zero
 third-party modules loaded), but it's still good practice to keep testing
 against the DRM-free build going forward to eliminate that variable.
 
-## Next step (Phase 2, not yet done)
+## Phase 2a: alternate-eye stereo — WORKING in level 1
 
-Implement actual stereo duplication: for shaders with `hasMVP`, override the
-cbuffer contents with per-eye-corrected matrices and issue each draw call
-twice (once per eye) into separate render targets, before standing up an
-OpenXR session to drive real per-eye view/projection from HMD pose.
+`src/stereo.cpp` + `PrepareDraw` in `src/capture.cpp`. Every Present flips
+the eye; before each draw the bound slot-0 cbuffer is rewritten (from the
+CPU shadow of what the game last uploaded, so it's idempotent) with that
+eye's matrices. Game uploads per-object cbuffers with `Map(WRITE_DISCARD)`
+(no NO_OVERWRITE seen), so shadowing at Unmap is complete.
 
+Verified: consecutive frame dumps (F12) turned into a red/cyan anaglyph show
+depth-correct parallax — near petal widely split, rocks less, distant hills
+~0. With stereo off (F9) the frame is identical to vanilla.
+
+Hotkeys (in-game): F9 stereo on/off, F10/F11 separation down/up (x1.25),
+F8 billboard toward each eye vs. head center, F12 dump next two frames.
+Config: `vrmod.ini` next to the game exe (see `vrmod.ini.example`).
+
+Separation is in world units (default 0.065); world scale is unknown yet —
+tune in-headset.
+
+### Automated testing without touching the keyboard
+
+The game ignores `SendInput` keyboard/mouse (raw input filters injected
+events), so `src/fakepad.cpp` hooks `XInputGetState` and adds a virtual pad
+driven by `vrmod_pad.txt` (enable with `[debug] fakepad=1`).
+`tools/gameinput.ps1` wraps it: `Start-Level1` launches the GOG build and
+drives the menu into level 1 (steer to the pot, hold RT immediately);
+`Snap` screenshots the desktop; `Capture-StereoPair` makes an anaglyph.
+This hook is also where VR controller input will plug in.
+
+## Next step (Phase 2b)
+
+Stand up OpenXR (SteamVR is the active runtime; `openxr_loader.dll` ships
+with SteamVR, headers still needed): create a session on the game's D3D11
+device, and in Present copy the backbuffer into the swapchain image of the
+eye that frame was rendered for (AER), then submit both layers. After that:
+drive the per-eye offset and rotation from the HMD pose instead of a fixed
+IPD, and replace the game's projection with the HMD's per-eye FOV.
 ## Tools in this repo
 
 - `build.bat` — builds the proxy `d3d11.dll` mod itself, deploys it + a

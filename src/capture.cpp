@@ -1,6 +1,7 @@
 #include "capture.h"
 #include "log.h"
 #include "mat4.h"
+#include "stereo.h"
 #include <MinHook.h>
 #include <d3d11shader.h>
 #include <d3dcompiler.h>
@@ -12,17 +13,42 @@
 #include <cctype>
 #include <string>
 
+// What to do with one cbuffer variable when rendering a given eye.
+enum class PatchKind { Clip, View, EyePos };
+
+struct PatchVar
+{
+    PatchKind kind;
+    UINT offset;
+};
+
 struct ShaderOffsets
 {
     bool hasModel = false;   UINT modelOffset = 0;
     bool hasMVP = false;     UINT mvpOffset = 0;
-    bool hasEyePos = false;  UINT eyePosOffset = 0;
+    std::vector<PatchVar> patches;
     UINT cbSize = 0;
     int  id = 0;
 };
 
+// CPU-side copy of what the game last wrote into a (small) constant buffer.
+struct BufferShadow
+{
+    std::vector<uint8_t> data;
+    uint64_t gen = 0;            // bumped on every game write
+    bool valid = false;          // false after writes we couldn't mirror fully
+    bool infoKnown = false;
+    D3D11_USAGE usage = D3D11_USAGE_DEFAULT;
+
+    // What the GPU copy currently holds relative to `data`.
+    uint64_t patchedGen = ~0ull;
+    const ShaderOffsets* patchedLayout = nullptr;
+    float patchedClip = 0.0f;
+    bool patchedEyePos = false;
+};
+
 static std::unordered_map<ID3D11VertexShader*, ShaderOffsets> g_offsets;
-static std::unordered_map<ID3D11Resource*, std::vector<uint8_t>> g_cbShadow;
+static std::unordered_map<ID3D11Resource*, BufferShadow> g_cbShadow;
 static std::unordered_map<ID3D11Resource*, void*> g_activeMap;
 static int g_nextShaderId = 1;
 
@@ -35,6 +61,7 @@ static std::unordered_map<ID3D11DeviceContext*, ContextState> g_contextState;
 
 static std::atomic<uint64_t> g_captureFrame{ 0 };
 static int g_logBudget = 0;
+static bool g_vpObservedThisFrame = false;
 
 static std::atomic<uint64_t> g_countVSSetShader{ 0 };
 static std::atomic<uint64_t> g_countVSSetCB{ 0 };
@@ -45,6 +72,9 @@ static std::atomic<uint64_t> g_countDrawIndexed{ 0 };
 static std::atomic<uint64_t> g_countDraw{ 0 };
 static std::atomic<uint64_t> g_countDrawIndexedInstanced{ 0 };
 static std::atomic<uint64_t> g_countDrawInstanced{ 0 };
+
+static uint64_t g_mapTypeCount[6] = {};
+static uint64_t g_statPatched = 0, g_statPatchCached = 0, g_statNoShadow = 0, g_statOrtho = 0, g_statNoVars = 0;
 
 using CreateVertexShader_t = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, const void*, SIZE_T, ID3D11ClassLinkage*, ID3D11VertexShader**);
 using VSSetShader_t = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11VertexShader*, ID3D11ClassInstance* const*, UINT);
@@ -68,12 +98,11 @@ static Draw_t g_realDraw = nullptr;
 static DrawIndexedInstanced_t g_realDrawIndexedInstanced = nullptr;
 static DrawInstanced_t g_realDrawInstanced = nullptr;
 
-static bool NameContains(const char* name, const char* needle)
+static std::string Lower(const char* s)
 {
-    std::string a(name), b(needle);
+    std::string a(s);
     for (auto& c : a) c = (char)tolower((unsigned char)c);
-    for (auto& c : b) c = (char)tolower((unsigned char)c);
-    return a.find(b) != std::string::npos;
+    return a;
 }
 
 static void ReflectAndCacheOffsets(ID3D11VertexShader* shader, const void* bytecode, SIZE_T len)
@@ -87,6 +116,7 @@ static void ReflectAndCacheOffsets(ID3D11VertexShader* shader, const void* bytec
 
     ShaderOffsets offsets;
     offsets.id = g_nextShaderId++;
+    std::string names;
 
     for (UINT cb = 0; cb < shaderDesc.ConstantBuffers; ++cb)
     {
@@ -107,30 +137,45 @@ static void ReflectAndCacheOffsets(ID3D11VertexShader* shader, const void* bytec
             ID3D11ShaderReflectionVariable* varRefl = cbRefl->GetVariableByIndex(v);
             D3D11_SHADER_VARIABLE_DESC varDesc = {};
             varRefl->GetDesc(&varDesc);
+            std::string n = Lower(varDesc.Name);
 
-            if (NameContains(varDesc.Name, "modelviewproj"))
+            // Exact names only: substring matching confused "oldModelViewProj"
+            // with "modelViewProj" (MotionBlur shaders have both).
+            if (n == "modelviewproj")
             {
                 offsets.hasMVP = true;
                 offsets.mvpOffset = varDesc.StartOffset;
+                offsets.patches.push_back({ PatchKind::Clip, varDesc.StartOffset });
             }
-            else if (NameContains(varDesc.Name, "model") && !NameContains(varDesc.Name, "modelview") && !NameContains(varDesc.Name, "modelit"))
+            else if (n == "oldmodelviewproj" || n == "viewprojection" || n == "viewprojmtx")
+                offsets.patches.push_back({ PatchKind::Clip, varDesc.StartOffset });
+            else if (n == "modelview")
+                offsets.patches.push_back({ PatchKind::View, varDesc.StartOffset });
+            else if (n == "eyepositionws")
+                offsets.patches.push_back({ PatchKind::EyePos, varDesc.StartOffset });
+            else if (n == "model")
             {
                 offsets.hasModel = true;
                 offsets.modelOffset = varDesc.StartOffset;
             }
-            else if (NameContains(varDesc.Name, "eyeposition"))
-            {
-                offsets.hasEyePos = true;
-                offsets.eyePosOffset = varDesc.StartOffset;
-            }
+            else
+                continue;
+            names += varDesc.Name;
+            names += ' ';
         }
     }
     refl->Release();
 
+    // Drop patches that don't fit in the reflected cbuffer (defensive).
+    std::vector<PatchVar> kept;
+    for (auto& p : offsets.patches)
+        if (p.offset + (p.kind == PatchKind::EyePos ? 12u : 64u) <= offsets.cbSize)
+            kept.push_back(p);
+    offsets.patches.swap(kept);
+
     g_offsets[shader] = offsets;
-    Log("[capture] shader #%d reflected: hasModel=%d(@%u) hasMVP=%d(@%u) hasEyePos=%d(@%u) cbSize=%u",
-        offsets.id, offsets.hasModel, offsets.modelOffset, offsets.hasMVP, offsets.mvpOffset,
-        offsets.hasEyePos, offsets.eyePosOffset, offsets.cbSize);
+    Log("[capture] shader #%d reflected: cbSize=%u model=%d mvp=%d patches=%zu [%s]",
+        offsets.id, offsets.cbSize, offsets.hasModel, offsets.hasMVP, offsets.patches.size(), names.c_str());
 }
 
 static HRESULT STDMETHODCALLTYPE Hook_CreateVertexShader(ID3D11Device* self, const void* bytecode, SIZE_T len, ID3D11ClassLinkage* linkage, ID3D11VertexShader** out)
@@ -156,12 +201,41 @@ static void STDMETHODCALLTYPE Hook_VSSetConstantBuffers(ID3D11DeviceContext* sel
     g_realVSSetConstantBuffers(self, startSlot, numBuffers, buffers);
 }
 
+static void RecordGameWrite(ID3D11Resource* resource, const void* src)
+{
+    D3D11_RESOURCE_DIMENSION dim;
+    resource->GetType(&dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_BUFFER)
+        return;
+
+    D3D11_BUFFER_DESC desc = {};
+    reinterpret_cast<ID3D11Buffer*>(resource)->GetDesc(&desc);
+    if (!(desc.BindFlags & D3D11_BIND_CONSTANT_BUFFER) || desc.ByteWidth == 0 || desc.ByteWidth > 4096)
+        return;
+
+    BufferShadow& s = g_cbShadow[resource];
+    s.infoKnown = true;
+    s.usage = desc.Usage;
+    s.gen++;
+    if (src)
+    {
+        s.data.resize(desc.ByteWidth);
+        memcpy(s.data.data(), src, desc.ByteWidth);
+        s.valid = true;
+    }
+    else
+        s.valid = false;
+}
+
 static HRESULT STDMETHODCALLTYPE Hook_Map(ID3D11DeviceContext* self, ID3D11Resource* resource, UINT sub, D3D11_MAP mapType, UINT flags, D3D11_MAPPED_SUBRESOURCE* out)
 {
     g_countMap++;
     HRESULT hr = g_realMap(self, resource, sub, mapType, flags, out);
-    if (SUCCEEDED(hr) && out)
+    if (SUCCEEDED(hr) && out && mapType != D3D11_MAP_READ)
+    {
+        if ((unsigned)mapType < 6) g_mapTypeCount[mapType]++;
         g_activeMap[resource] = out->pData;
+    }
     return hr;
 }
 
@@ -171,19 +245,7 @@ static void STDMETHODCALLTYPE Hook_Unmap(ID3D11DeviceContext* self, ID3D11Resour
     auto it = g_activeMap.find(resource);
     if (it != g_activeMap.end())
     {
-        D3D11_RESOURCE_DIMENSION dim;
-        resource->GetType(&dim);
-        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER)
-        {
-            D3D11_BUFFER_DESC desc = {};
-            reinterpret_cast<ID3D11Buffer*>(resource)->GetDesc(&desc);
-            if (desc.ByteWidth > 0 && desc.ByteWidth <= 4096)
-            {
-                auto& shadow = g_cbShadow[resource];
-                shadow.resize(desc.ByteWidth);
-                memcpy(shadow.data(), it->second, desc.ByteWidth);
-            }
-        }
+        RecordGameWrite(resource, it->second);
         g_activeMap.erase(it);
     }
     g_realUnmap(self, resource, sub);
@@ -192,96 +254,153 @@ static void STDMETHODCALLTYPE Hook_Unmap(ID3D11DeviceContext* self, ID3D11Resour
 static void STDMETHODCALLTYPE Hook_UpdateSubresource(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub, const D3D11_BOX* box, const void* src, UINT rowPitch, UINT depthPitch)
 {
     g_countUpdateSubresource++;
-    if (dstSub == 0 && !box && src)
-    {
-        D3D11_RESOURCE_DIMENSION dim;
-        dst->GetType(&dim);
-        if (dim == D3D11_RESOURCE_DIMENSION_BUFFER)
-        {
-            D3D11_BUFFER_DESC desc = {};
-            reinterpret_cast<ID3D11Buffer*>(dst)->GetDesc(&desc);
-            if (desc.ByteWidth > 0 && desc.ByteWidth <= 4096)
-            {
-                auto& shadow = g_cbShadow[dst];
-                shadow.resize(desc.ByteWidth);
-                memcpy(shadow.data(), src, desc.ByteWidth);
-            }
-        }
-    }
+    if (dstSub == 0)
+        RecordGameWrite(dst, box ? nullptr : src); // partial updates: can't mirror, mark invalid
     g_realUpdateSubresource(self, dst, dstSub, box, src, rowPitch, depthPitch);
 }
 
-static void LogDrawIfBudget(ID3D11DeviceContext* self, const char* kind)
+static void WriteBuffer(ID3D11DeviceContext* ctx, ID3D11Resource* buf, const BufferShadow& s, const void* data)
 {
-    ContextState& state = g_contextState[self];
-
-    if (g_logBudget <= 0) return;
-    auto offIt = g_offsets.find(state.currentVS);
-    if (offIt == g_offsets.end()) return;
-    auto shadowIt = g_cbShadow.find(state.currentSlot0CB);
-    if (shadowIt == g_cbShadow.end()) return;
-
-    const ShaderOffsets& off = offIt->second;
-    const std::vector<uint8_t>& bytes = shadowIt->second;
-    if (!off.hasMVP || off.mvpOffset + 64 > bytes.size()) return;
-
-    Mat4 mvp;
-    memcpy(&mvp, bytes.data() + off.mvpOffset, 64);
-
-    if (off.hasModel && off.modelOffset + 64 <= bytes.size())
+    if (s.usage == D3D11_USAGE_DYNAMIC)
     {
-        Mat4 model, modelInv;
-        memcpy(&model, bytes.data() + off.modelOffset, 64);
-        if (Mat4Inverse(model, modelInv))
+        D3D11_MAPPED_SUBRESOURCE m = {};
+        if (SUCCEEDED(g_realMap(ctx, buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &m)))
         {
-            Mat4 viewProj = Mat4Mul(modelInv, mvp);
-            Log("[capture] %s shader#%d frame=%llu ViewProj row0=(%.3f %.3f %.3f %.3f) row3=(%.3f %.3f %.3f %.3f)",
-                kind, off.id, (unsigned long long)g_captureFrame.load(),
-                viewProj.m[0][0], viewProj.m[0][1], viewProj.m[0][2], viewProj.m[0][3],
-                viewProj.m[3][0], viewProj.m[3][1], viewProj.m[3][2], viewProj.m[3][3]);
+            memcpy(m.pData, data, s.data.size());
+            g_realUnmap(ctx, buf, 0);
         }
     }
-    else
+    else if (s.usage == D3D11_USAGE_DEFAULT)
+        g_realUpdateSubresource(ctx, buf, 0, nullptr, data, 0, 0);
+}
+
+// Before each draw: recover the camera once per frame, then rewrite the bound
+// slot-0 cbuffer with this eye's matrices (built from the game's original data).
+static void PrepareDraw(ID3D11DeviceContext* self)
+{
+    ContextState& state = g_contextState[self];
+    auto offIt = g_offsets.find(state.currentVS);
+    if (offIt == g_offsets.end()) return;
+    const ShaderOffsets& off = offIt->second;
+    if (off.patches.empty()) { g_statNoVars++; return; }
+
+    auto shIt = g_cbShadow.find(state.currentSlot0CB);
+    if (shIt == g_cbShadow.end() || !shIt->second.valid) { g_statNoShadow++; return; }
+    BufferShadow& s = shIt->second;
+    const std::vector<uint8_t>& orig = s.data;
+
+    if (!g_vpObservedThisFrame && off.hasModel && off.hasMVP &&
+        off.modelOffset + 64 <= orig.size() && off.mvpOffset + 64 <= orig.size())
     {
-        Log("[capture] %s shader#%d frame=%llu (no model matrix) MVP row0=(%.3f %.3f %.3f %.3f) row3=(%.3f %.3f %.3f %.3f)",
-            kind, off.id, (unsigned long long)g_captureFrame.load(),
-            mvp.m[0][0], mvp.m[0][1], mvp.m[0][2], mvp.m[0][3],
-            mvp.m[3][0], mvp.m[3][1], mvp.m[3][2], mvp.m[3][3]);
+        Mat4 model, modelInv, mvp;
+        memcpy(&model, orig.data() + off.modelOffset, 64);
+        memcpy(&mvp, orig.data() + off.mvpOffset, 64);
+        if (Mat4Inverse(model, modelInv) && IsPerspective(mvp))
+        {
+            Mat4 viewProj = Mat4Mul(mvp, modelInv); // column-vector: MVP = VP * Model
+            StereoObserveViewProj(viewProj);
+            g_vpObservedThisFrame = true;
+            if (g_logBudget > 0)
+            {
+                auto dump = [](const char* name, const Mat4& m)
+                {
+                    Log("  %s = [%.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f | %.5f %.5f %.5f %.5f]", name,
+                        m.m[0][0], m.m[0][1], m.m[0][2], m.m[0][3], m.m[1][0], m.m[1][1], m.m[1][2], m.m[1][3],
+                        m.m[2][0], m.m[2][1], m.m[2][2], m.m[2][3], m.m[3][0], m.m[3][1], m.m[3][2], m.m[3][3]);
+                };
+                Log("[capture] shader#%d frame=%llu matrices:", off.id, (unsigned long long)g_captureFrame.load());
+                dump("model", model);
+                dump("mvp  ", mvp);
+                dump("VP   ", viewProj);
+                g_logBudget--;
+            }
+        }
     }
-    g_logBudget--;
+
+    float clip = StereoClipShift();
+    float eyeOff[3];
+    bool eyePos = StereoWorldEyeOffset(eyeOff);
+
+    // GPU copy already matches what we want?
+    bool gpuIsOriginal = s.patchedGen != s.gen;
+    if (clip == 0.0f && !eyePos && gpuIsOriginal) return;
+    if (!gpuIsOriginal && s.patchedLayout == &off && s.patchedClip == clip && s.patchedEyePos == eyePos)
+    {
+        g_statPatchCached++;
+        return;
+    }
+
+    static std::vector<uint8_t> patched;
+    patched = orig;
+    float view = StereoViewShift();
+    bool any = false;
+    for (const PatchVar& p : off.patches)
+    {
+        if (p.offset + (p.kind == PatchKind::EyePos ? 12u : 64u) > patched.size()) continue;
+        float* f = reinterpret_cast<float*>(patched.data() + p.offset);
+        switch (p.kind)
+        {
+        case PatchKind::Clip:
+        {
+            Mat4 m; memcpy(&m, f, 64);
+            if (!IsPerspective(m)) { g_statOrtho++; break; }
+            f[3] += clip; // [0][3]
+            any = true;
+            break;
+        }
+        case PatchKind::View:
+            f[3] += view; // [0][3]
+            any = true;
+            break;
+        case PatchKind::EyePos:
+            if (eyePos) { f[0] += eyeOff[0]; f[1] += eyeOff[1]; f[2] += eyeOff[2]; any = true; }
+            break;
+        }
+    }
+
+    if (!any && gpuIsOriginal) return;
+    WriteBuffer(self, state.currentSlot0CB, s, any ? patched.data() : orig.data());
+    s.patchedGen = any ? s.gen : ~0ull;
+    s.patchedLayout = &off;
+    s.patchedClip = clip;
+    s.patchedEyePos = eyePos;
+    g_statPatched++;
 }
 
 static void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* self, UINT count, UINT start, INT base)
 {
     g_countDrawIndexed++;
-    LogDrawIfBudget(self, "DrawIndexed");
+    PrepareDraw(self);
     g_realDrawIndexed(self, count, start, base);
 }
 static void STDMETHODCALLTYPE Hook_Draw(ID3D11DeviceContext* self, UINT count, UINT start)
 {
     g_countDraw++;
-    LogDrawIfBudget(self, "Draw");
+    PrepareDraw(self);
     g_realDraw(self, count, start);
 }
 static void STDMETHODCALLTYPE Hook_DrawIndexedInstanced(ID3D11DeviceContext* self, UINT ipc, UINT ic, UINT sil, INT bvl, UINT sii)
 {
     g_countDrawIndexedInstanced++;
-    LogDrawIfBudget(self, "DrawIndexedInstanced");
+    PrepareDraw(self);
     g_realDrawIndexedInstanced(self, ipc, ic, sil, bvl, sii);
 }
 static void STDMETHODCALLTYPE Hook_DrawInstanced(ID3D11DeviceContext* self, UINT vpi, UINT ic, UINT sv, UINT si)
 {
     g_countDrawInstanced++;
-    LogDrawIfBudget(self, "DrawInstanced");
+    PrepareDraw(self);
     g_realDrawInstanced(self, vpi, ic, sv, si);
 }
 
 void NotifyCaptureFrameBoundary()
 {
     uint64_t f = g_captureFrame.fetch_add(1);
+    g_vpObservedThisFrame = false;
+    StereoFrameBoundary();
+
     if ((f % 180) == 0)
     {
-        g_logBudget = 25;
+        g_logBudget = 3;
         Log("[counts] frame=%llu VSSetShader=%llu VSSetCB=%llu Map=%llu Unmap=%llu UpdateSubresource=%llu "
             "DrawIndexed=%llu Draw=%llu DrawIndexedInstanced=%llu DrawInstanced=%llu",
             (unsigned long long)f,
@@ -290,6 +409,13 @@ void NotifyCaptureFrameBoundary()
             (unsigned long long)g_countUpdateSubresource.load(),
             (unsigned long long)g_countDrawIndexed.load(), (unsigned long long)g_countDraw.load(),
             (unsigned long long)g_countDrawIndexedInstanced.load(), (unsigned long long)g_countDrawInstanced.load());
+        Log("[stereo] eye=%d patched=%llu cached=%llu noShadow=%llu orthoSkipped=%llu noVars=%llu "
+            "mapTypes(W=%llu RW=%llu DISCARD=%llu NOOVERWRITE=%llu)",
+            StereoCurrentEye(),
+            (unsigned long long)g_statPatched, (unsigned long long)g_statPatchCached,
+            (unsigned long long)g_statNoShadow, (unsigned long long)g_statOrtho, (unsigned long long)g_statNoVars,
+            (unsigned long long)g_mapTypeCount[D3D11_MAP_WRITE], (unsigned long long)g_mapTypeCount[D3D11_MAP_READ_WRITE],
+            (unsigned long long)g_mapTypeCount[D3D11_MAP_WRITE_DISCARD], (unsigned long long)g_mapTypeCount[D3D11_MAP_WRITE_NO_OVERWRITE]);
     }
 }
 

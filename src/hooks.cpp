@@ -1,6 +1,7 @@
 #include "hooks.h"
 #include "log.h"
 #include "capture.h"
+#include "fakepad.h"
 #include <cstdio>
 #include <atomic>
 #include <vector>
@@ -94,10 +95,11 @@ static void DumpBackbufferBMP(IDXGISwapChain* swapChain, uint64_t frameIndex)
                 const unsigned char* srcRow = src + (size_t)y * mapped.RowPitch;
                 for (UINT x = 0; x < w; ++x)
                 {
-                    // Assume BGRA8 or RGBA8 (both 4 bytes/pixel); write as BGR.
-                    unsigned char b = srcRow[x * 4 + 0];
+                    // 4 bytes/pixel; RGBA formats (28/29) need R and B swapped for BMP's BGR.
+                    bool rgba = desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM || desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB;
+                    unsigned char b = srcRow[x * 4 + (rgba ? 2 : 0)];
                     unsigned char g = srcRow[x * 4 + 1];
-                    unsigned char r = srcRow[x * 4 + 2];
+                    unsigned char r = srcRow[x * 4 + (rgba ? 0 : 2)];
                     padded[x * 3 + 0] = b;
                     padded[x * 3 + 1] = g;
                     padded[x * 3 + 2] = r;
@@ -124,9 +126,16 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
     if (frame == 0)
         Log("First Present() call received - hook is live.");
 
-    // Dump a handful of early frames, then one every ~5 seconds (assuming ~60fps).
-    if (frame < 5 || (frame % 300) == 0)
+    // F12 dumps the next two frames: consecutive frames hold both eyes under
+    // alternate-eye stereo. (Periodic dumps at 7680x2160 cost ~50MB each.)
+    static int dumpRemaining = 0;
+    if (GetAsyncKeyState(VK_F12) & 1)
+        dumpRemaining = 2;
+    if (frame < 2 || dumpRemaining > 0)
+    {
         DumpBackbufferBMP(This, frame);
+        if (dumpRemaining > 0) dumpRemaining--;
+    }
 
     return g_realPresent(This, SyncInterval, Flags);
 }
@@ -147,4 +156,5 @@ void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* device, ID
     }
 
     InstallCaptureHooks(device, context);
+    InstallFakePad(g_dllDir);
 }

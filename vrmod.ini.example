@@ -1,0 +1,8 @@
+[stereo]
+enabled=1
+separation=0.065
+shiftEyePosition=0
+
+[debug]
+fakepad=1
+

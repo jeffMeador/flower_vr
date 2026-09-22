@@ -2,6 +2,7 @@
 #include <d3d11.h>
 #include "log.h"
 #include "hooks.h"
+#include "stereo.h"
 
 HMODULE g_realD3D11 = nullptr;
 wchar_t g_dllDir[MAX_PATH] = {};
@@ -41,6 +42,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
         LogInit(g_dllDir);
         SetHooksDllDir(g_dllDir);
         Log("VRMod proxy d3d11.dll attached. real d3d11 loaded: %d", g_realD3D11 != nullptr);
+        StereoLoadConfig(g_dllDir);
     }
     return TRUE;
 }
