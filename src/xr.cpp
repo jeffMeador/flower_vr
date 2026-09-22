@@ -41,6 +41,10 @@ static XrSpace g_viewSpace = XR_NULL_HANDLE;
 static XrSpace g_localSpace = XR_NULL_HANDLE;
 static XrFovf g_eyeFov[2] = {};
 static bool g_recenterPending = false;
+// Comfort: in VR the viewpoint sits behind/above the game camera so the lead
+// petal isn't right between the eyes (meters, reference frame; saved to ini).
+static float g_camBack = 1.0f, g_camUp = 0.25f;
+static wchar_t g_iniPath[MAX_PATH] = {};
 static XrSessionState g_state = XR_SESSION_STATE_UNKNOWN;
 static bool g_sessionRunning = false;
 
@@ -80,6 +84,11 @@ void XrInit(ID3D11Device* device, const wchar_t* dllDir)
         g_loaderPath, MAX_PATH, ini);
     g_device = device;
     g_stage = XrStage::NeedInstance;
+    wcscpy_s(g_iniPath, ini);
+    wchar_t buf[32];
+    GetPrivateProfileStringW(L"xr", L"cameraBack", L"1.0", buf, 32, ini); g_camBack = (float)_wtof(buf);
+    GetPrivateProfileStringW(L"xr", L"cameraUp", L"0.25", buf, 32, ini); g_camUp = (float)_wtof(buf);
+    Log("[xr] camera offset: back %.2f m, up %.2f m", g_camBack, g_camUp);
 }
 
 static bool LoadLoader()
@@ -428,6 +437,23 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
             g_recenterPending = false;
         }
 
+        // Live comfort tuning: [ ] back/forward, , . down/up (0.25 m steps).
+        {
+            float back = g_camBack, up = g_camUp;
+            if (GetAsyncKeyState(VK_OEM_4) & 1) back += 0.25f;      // [
+            if (GetAsyncKeyState(VK_OEM_6) & 1) back -= 0.25f;      // ]
+            if (GetAsyncKeyState(VK_OEM_COMMA) & 1) up -= 0.25f;    // ,
+            if (GetAsyncKeyState(VK_OEM_PERIOD) & 1) up += 0.25f;   // .
+            if (back != g_camBack || up != g_camUp)
+            {
+                g_camBack = back; g_camUp = up;
+                wchar_t v[32];
+                swprintf_s(v, L"%.2f", back); WritePrivateProfileStringW(L"xr", L"cameraBack", v, g_iniPath);
+                swprintf_s(v, L"%.2f", up); WritePrivateProfileStringW(L"xr", L"cameraUp", v, g_iniPath);
+                Log("[xr] camera offset: back %.2f m, up %.2f m (saved)", back, up);
+            }
+        }
+
         if (located && g_refSet)
         {
             XrQuaternionf refInv = QConj(g_ref.orientation);
@@ -447,7 +473,7 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
                                  views[e].pose.position.y - g_ref.position.y,
                                  views[e].pose.position.z - g_ref.position.z };
                 XrVector3f p = QRot(refInv, d);
-                float rot[9], pos[3] = { p.x, p.y, p.z };
+                float rot[9], pos[3] = { p.x, p.y + g_camUp, p.z + g_camBack };
                 QToMat(q, rot);
                 StereoSetEyePose(e, rot, pos);
                 g_givenPose[e] = views[e].pose;
@@ -462,7 +488,7 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
                                  head.pose.position.y - g_ref.position.y,
                                  head.pose.position.z - g_ref.position.z };
                 XrVector3f p = QRot(refInv, d);
-                float rot[9], pos[3] = { p.x, p.y, p.z };
+                float rot[9], pos[3] = { p.x, p.y + g_camUp, p.z + g_camBack };
                 QToMat(q, rot);
                 StereoSetHeadPose(rot, pos);
             }
