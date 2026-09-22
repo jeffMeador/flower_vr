@@ -37,15 +37,26 @@ int StereoCurrentEye();
 // so we know the projection's horizontal scale.
 void StereoObserveViewProj(const Mat4& viewProj);
 
-// Clip-space X shift to add to [0][3] of a perspective MVP for the current eye
-// (0 when mono or projection not yet known).
-float StereoClipShift();
-
-// View-space X shift to add to [0][3] of a modelView matrix for the current eye.
-float StereoViewShift();
+// Projection scales of the game camera (P[0][0], P[1][1]); false until seen.
+bool StereoProjection(float& xs, float& ys);
 
 // World-space eye offset for the current eye (to shift eyePositionWS), or false.
 bool StereoWorldEyeOffset(float out[3]);
+
+// Display remap: replace the game's projection with a headset eye's FOV,
+// mapped into the centered crop the XR code copies out of the backbuffer.
+// tans are tan(angle) of the eye's left/right/up/down edges (left/down < 0);
+// cropFracX/Y = crop size / backbuffer size. eyeIndex 0 = left, 1 = right.
+void StereoSetDisplayFov(int eyeIndex, float tanL, float tanR, float tanU, float tanD, float cropFracX, float cropFracY);
+
+// Nonzero when draws need patching; changes whenever the wanted cbuffer
+// contents change (eye flip, projection change), so patches can be cached.
+uint64_t StereoPatchKey();
+
+// Apply this eye's shift (and display remap, if set) to a perspective
+// clip matrix / a modelView matrix, in place (row-major float[16]).
+void StereoPatchClip(float* m);
+void StereoPatchView(float* m);
 
 // True if the matrix is a perspective transform (w depends on position).
 inline bool IsPerspective(const Mat4& m)

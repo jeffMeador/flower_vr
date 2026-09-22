@@ -169,14 +169,50 @@ drives the menu into level 1 (steer to the pot, hold RT immediately);
 `Snap` screenshots the desktop; `Capture-StereoPair` makes an anaglyph.
 This hook is also where VR controller input will plug in.
 
-## Next step (Phase 2b)
+## Phase 2b: OpenXR output — WORKING (head-locked)
 
-Stand up OpenXR (SteamVR is the active runtime; `openxr_loader.dll` ships
-with SteamVR, headers still needed): create a session on the game's D3D11
-device, and in Present copy the backbuffer into the swapchain image of the
-eye that frame was rendered for (AER), then submit both layers. After that:
-drive the per-eye offset and rotation from the HMD pose instead of a fixed
-IPD, and replace the game's projection with the HMD's per-eye FOV.
+`src/xr.cpp`: loads SteamVR's `openxr_loader.dll` at runtime (headers in
+`thirdparty/openxr`, no import lib), creates a session on the game's own
+D3D11 device, and in Present copies the centered H×H square of the
+backbuffer into the swapchain of the eye that frame was rendered for (AER),
+then submits a projection layer in VIEW space (head-locked for now).
+Retries until SteamVR/headset are up. Game vsync is disabled while the
+session runs; xrWaitFrame paces (90 Hz on this headset → 45 Hz per eye).
+
+**Display remap** (`StereoPatchClip`): each perspective MVP's rows 0/1 are
+rescaled so the headset eye's (asymmetric) FOV lands exactly in that
+centered square: `x' = ax·x + bx·w`, `y' = ay·y + by·w`. The layer is
+submitted with the same FOV, so the image is geometrically correct.
+
+**Culling fix** (`src/camoverride.cpp`): the game culls to its own camera
+frustum (only ~14° vertical on 32:9!), so grass vanished outside a small
+rectangle. The engine's single per-frame FOV write was found with the
+`camfind` debug tool (F7: finds the camera block {fov, near 0.1, far 1330.5,
+aspect} by value, then logs every instruction touching it via a hardware
+watchpoint):
+
+```
+Flower.exe+0x3F5DE  mov   rcx,[rbx+28h]      ; engine camera
+Flower.exe+0x3F5E2  movss xmm0,[rbx+60h]     ; wanted FOV (vertical degrees)
+Flower.exe+0x3F5E7  ucomiss xmm0,[rcx+134h]  ; changed? -> store, vtable[0x98] rebuilds projection
+```
+
+Those 16 bytes are replaced (after verifying them) with a jump to a stub
+that substitutes `[xr] gameFov` (default 125°) while the headset session is
+running. Result: `ys = 0.52` (125° vertical), full coverage. The aspect write
+(+0x140) doesn't stick, which is fine — horizontally the frustum is even
+wider. Camera layout: fov +0x134, near +0x138, far +0x13C, aspect +0x140.
+
+## Next steps
+
+1. **Head tracking**: rotate/translate the game view by the HMD pose
+   (apply `inverse(headPose)` in view space in `StereoPatchClip`, switch the
+   layer to LOCAL space) so the world stays put when you turn your head.
+2. Replace AER with true per-eye rendering (double draw calls) for full
+   frame rate per eye, or at least reprojection-friendly timing.
+3. Render only the square we use (resolution/aspect) to stop wasting 2/3 of
+   the pixels; tune world scale (`separation`) in-headset.
+4. Motion controllers → virtual pad (fakepad.cpp hook).
 ## Tools in this repo
 
 - `build.bat` — builds the proxy `d3d11.dll` mod itself, deploys it + a

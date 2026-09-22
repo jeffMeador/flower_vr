@@ -43,8 +43,7 @@ struct BufferShadow
     // What the GPU copy currently holds relative to `data`.
     uint64_t patchedGen = ~0ull;
     const ShaderOffsets* patchedLayout = nullptr;
-    float patchedClip = 0.0f;
-    bool patchedEyePos = false;
+    uint64_t patchedKey = 0;
 };
 
 static std::unordered_map<ID3D11VertexShader*, ShaderOffsets> g_offsets;
@@ -317,14 +316,14 @@ static void PrepareDraw(ID3D11DeviceContext* self)
         }
     }
 
-    float clip = StereoClipShift();
+    uint64_t key = StereoPatchKey();
     float eyeOff[3];
     bool eyePos = StereoWorldEyeOffset(eyeOff);
 
     // GPU copy already matches what we want?
     bool gpuIsOriginal = s.patchedGen != s.gen;
-    if (clip == 0.0f && !eyePos && gpuIsOriginal) return;
-    if (!gpuIsOriginal && s.patchedLayout == &off && s.patchedClip == clip && s.patchedEyePos == eyePos)
+    if (key == 0 && gpuIsOriginal) return;
+    if (!gpuIsOriginal && s.patchedLayout == &off && s.patchedKey == key)
     {
         g_statPatchCached++;
         return;
@@ -332,29 +331,31 @@ static void PrepareDraw(ID3D11DeviceContext* self)
 
     static std::vector<uint8_t> patched;
     patched = orig;
-    float view = StereoViewShift();
     bool any = false;
-    for (const PatchVar& p : off.patches)
+    if (key != 0)
     {
-        if (p.offset + (p.kind == PatchKind::EyePos ? 12u : 64u) > patched.size()) continue;
-        float* f = reinterpret_cast<float*>(patched.data() + p.offset);
-        switch (p.kind)
+        for (const PatchVar& p : off.patches)
         {
-        case PatchKind::Clip:
-        {
-            Mat4 m; memcpy(&m, f, 64);
-            if (!IsPerspective(m)) { g_statOrtho++; break; }
-            f[3] += clip; // [0][3]
-            any = true;
-            break;
-        }
-        case PatchKind::View:
-            f[3] += view; // [0][3]
-            any = true;
-            break;
-        case PatchKind::EyePos:
-            if (eyePos) { f[0] += eyeOff[0]; f[1] += eyeOff[1]; f[2] += eyeOff[2]; any = true; }
-            break;
+            if (p.offset + (p.kind == PatchKind::EyePos ? 12u : 64u) > patched.size()) continue;
+            float* f = reinterpret_cast<float*>(patched.data() + p.offset);
+            switch (p.kind)
+            {
+            case PatchKind::Clip:
+            {
+                Mat4 m; memcpy(&m, f, 64);
+                if (!IsPerspective(m)) { g_statOrtho++; break; }
+                StereoPatchClip(f);
+                any = true;
+                break;
+            }
+            case PatchKind::View:
+                StereoPatchView(f);
+                any = true;
+                break;
+            case PatchKind::EyePos:
+                if (eyePos) { f[0] += eyeOff[0]; f[1] += eyeOff[1]; f[2] += eyeOff[2]; any = true; }
+                break;
+            }
         }
     }
 
@@ -362,11 +363,9 @@ static void PrepareDraw(ID3D11DeviceContext* self)
     WriteBuffer(self, state.currentSlot0CB, s, any ? patched.data() : orig.data());
     s.patchedGen = any ? s.gen : ~0ull;
     s.patchedLayout = &off;
-    s.patchedClip = clip;
-    s.patchedEyePos = eyePos;
+    s.patchedKey = key;
     g_statPatched++;
 }
-
 static void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* self, UINT count, UINT start, INT base)
 {
     g_countDrawIndexed++;

@@ -2,6 +2,10 @@
 #include "log.h"
 #include "capture.h"
 #include "fakepad.h"
+#include "stereo.h"
+#include "xr.h"
+#include "camfind.h"
+#include "camoverride.h"
 #include <cstdio>
 #include <atomic>
 #include <vector>
@@ -121,6 +125,14 @@ static void DumpBackbufferBMP(IDXGISwapChain* swapChain, uint64_t frameIndex)
 static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 {
     uint64_t frame = g_frameCount.fetch_add(1);
+    int renderedEye = StereoCurrentEye(); // eye this finished frame was drawn for
+    XrSubmitFrame(This, renderedEye);
+    CamOverrideTick(XrSessionActive());
+    {
+        DXGI_SWAP_CHAIN_DESC scd = {};
+        This->GetDesc(&scd);
+        if (scd.BufferDesc.Height) CamFindTick((float)scd.BufferDesc.Width / scd.BufferDesc.Height);
+    }
     NotifyCaptureFrameBoundary();
 
     if (frame == 0)
@@ -137,6 +149,8 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
         if (dumpRemaining > 0) dumpRemaining--;
     }
 
+    // With a headset attached, xrWaitFrame paces us; don't also wait for the monitor.
+    if (XrSessionActive()) SyncInterval = 0;
     return g_realPresent(This, SyncInterval, Flags);
 }
 
@@ -157,4 +171,11 @@ void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* device, ID
 
     InstallCaptureHooks(device, context);
     InstallFakePad(g_dllDir);
+    XrInit(device, g_dllDir);
+    {
+        wchar_t ini[MAX_PATH], buf[32];
+        swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
+        GetPrivateProfileStringW(L"xr", L"gameFov", L"125", buf, 32, ini);
+        CamOverrideInstall((float)_wtof(buf));
+    }
 }
