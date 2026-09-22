@@ -1,5 +1,6 @@
 #include "camoverride.h"
 #include "log.h"
+#include "stereo.h"
 #include <Windows.h>
 #include <cstring>
 #include <cstdint>
@@ -39,6 +40,34 @@ static Ctl* g_ctl = nullptr;
 static float g_wantFov = 125.0f;
 static bool g_installed = false;
 
+// Runs on the engine's camera update, right after it writes the render
+// camera's matrix (node+0x90: x axis, y axis, z axis, position as float4s)
+// and before anything renders with it. While in VR we turn/move that camera
+// by the head pose, so culling, LOD and grass generation follow the head.
+static void OnCameraUpdate(uint8_t* node, uint8_t* wrapper)
+{
+    static DWORD firstThread = 0;
+    if (!firstThread)
+    {
+        firstThread = GetCurrentThreadId();
+        Log("[camoverride] camera update runs on thread %lu", firstThread);
+    }
+    if (!g_ctl || !g_ctl->enabled || !node) { StereoHeadNotApplied(); return; }
+
+    float* m = (float*)(node + 0x90);
+    float R[9], t[3];
+    if (!StereoTakeHeadForCamera(m, R, t)) return;
+
+    float e[3][4], pos[4];
+    memcpy(e, m, sizeof(e));
+    memcpy(pos, m + 12, sizeof(pos));
+    for (int j = 0; j < 3; ++j)
+        for (int k = 0; k < 3; ++k)
+            m[j * 4 + k] = e[0][k] * R[0 * 3 + j] + e[1][k] * R[1 * 3 + j] + e[2][k] * R[2 * 3 + j];
+    for (int k = 0; k < 3; ++k)
+        m[12 + k] = pos[k] + e[0][k] * t[0] + e[1][k] * t[1] + e[2][k] * t[2];
+}
+
 static void Emit(uint8_t*& p, std::initializer_list<uint8_t> bytes) { for (uint8_t b : bytes) *p++ = b; }
 static void Emit64(uint8_t*& p, uint64_t v) { memcpy(p, &v, 8); p += 8; }
 
@@ -62,6 +91,30 @@ bool CamOverrideInstall(float fovDegrees)
 
     uint8_t* stub = mem + 64;
     uint8_t* p = stub;
+    // Call OnCameraUpdate(node = [rbx+28h], wrapper = rbx) with all volatile
+    // registers preserved. rsp is 16-aligned at the patch site (push rbx;
+    // sub rsp,60h), so 7 pushes + 0x88 keeps it aligned for the call.
+    Emit(p, { 0x50, 0x51, 0x52, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53 }); // push rax,rcx,rdx,r8-r11
+    Emit(p, { 0x48, 0x81, 0xEC, 0x88, 0x00, 0x00, 0x00 });   // sub rsp,88h
+    Emit(p, { 0x0F, 0x11, 0x44, 0x24, 0x20 });               // movups [rsp+20h],xmm0
+    Emit(p, { 0x0F, 0x11, 0x4C, 0x24, 0x30 });               // movups [rsp+30h],xmm1
+    Emit(p, { 0x0F, 0x11, 0x54, 0x24, 0x40 });               // movups [rsp+40h],xmm2
+    Emit(p, { 0x0F, 0x11, 0x5C, 0x24, 0x50 });               // movups [rsp+50h],xmm3
+    Emit(p, { 0x0F, 0x11, 0x64, 0x24, 0x60 });               // movups [rsp+60h],xmm4
+    Emit(p, { 0x0F, 0x11, 0x6C, 0x24, 0x70 });               // movups [rsp+70h],xmm5
+    Emit(p, { 0x48, 0x8B, 0x4B, 0x28 });                     // mov rcx,[rbx+28h]
+    Emit(p, { 0x48, 0x89, 0xDA });                           // mov rdx,rbx
+    Emit(p, { 0x48, 0xB8 }); Emit64(p, (uint64_t)&OnCameraUpdate); // mov rax, OnCameraUpdate
+    Emit(p, { 0xFF, 0xD0 });                                 // call rax
+    Emit(p, { 0x0F, 0x10, 0x44, 0x24, 0x20 });               // movups xmm0,[rsp+20h]
+    Emit(p, { 0x0F, 0x10, 0x4C, 0x24, 0x30 });
+    Emit(p, { 0x0F, 0x10, 0x54, 0x24, 0x40 });
+    Emit(p, { 0x0F, 0x10, 0x5C, 0x24, 0x50 });
+    Emit(p, { 0x0F, 0x10, 0x64, 0x24, 0x60 });
+    Emit(p, { 0x0F, 0x10, 0x6C, 0x24, 0x70 });
+    Emit(p, { 0x48, 0x81, 0xC4, 0x88, 0x00, 0x00, 0x00 });   // add rsp,88h
+    Emit(p, { 0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5A, 0x59, 0x58 }); // pop r11-r8,rdx,rcx,rax
+
     Emit(p, { 0x48, 0x8B, 0x4B, 0x28 });             // mov rcx,[rbx+28h]
     Emit(p, { 0xF3, 0x0F, 0x10, 0x43, 0x60 });       // movss xmm0,[rbx+60h]
     Emit(p, { 0x50 });                               // push rax

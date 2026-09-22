@@ -454,6 +454,18 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
                 g_eyeFov[e] = views[e].fov;
             }
             g_givenValid = true;
+
+            if (headOk)
+            {
+                XrQuaternionf q = QMul(refInv, head.pose.orientation);
+                XrVector3f d = { head.pose.position.x - g_ref.position.x,
+                                 head.pose.position.y - g_ref.position.y,
+                                 head.pose.position.z - g_ref.position.z };
+                XrVector3f p = QRot(refInv, d);
+                float rot[9], pos[3] = { p.x, p.y, p.z };
+                QToMat(q, rot);
+                StereoSetHeadPose(rot, pos);
+            }
         }
 
         // 3. Submit both eyes with the exact pose each image was rendered with.

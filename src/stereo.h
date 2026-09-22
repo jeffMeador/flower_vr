@@ -49,6 +49,18 @@ bool StereoProjection(float& xs, float& ys);
 // next frame boundary. eyeIndex 0 = left, 1 = right.
 void StereoSetEyePose(int eyeIndex, const float rot[9], const float pos[3]);
 
+// Headset head (center) pose, same conventions. The engine camera is turned
+// by it (see camoverride.cpp) so culling follows the head; eye views then
+// only apply the residual inverse(eye) * head.
+void StereoSetHeadPose(const float rot[9], const float pos[3]);
+
+// Called from the engine's camera update with its camera matrix (x/y/z axes,
+// position as float4s). Returns the head rotation (row-major, in the engine
+// camera's local axes) and translation (game units) to apply, and records it
+// as the head pose the upcoming frame is rendered with.
+bool StereoTakeHeadForCamera(const float* cameraMatrix, float rot[9], float pos[3]);
+void StereoHeadNotApplied();
+
 // Headset eye FOV (tan of each edge; left/down < 0) and the crop the XR code
 // copies (crop size / backbuffer size).
 void StereoSetDisplayFov(int eyeIndex, float tanL, float tanR, float tanU, float tanD, float cropFracX, float cropFracY);

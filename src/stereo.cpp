@@ -136,6 +136,57 @@ void StereoSetEyePose(int eyeIndex, const float rot[9], const float pos[3])
     memcpy(p.pos, pos, sizeof(p.pos));
 }
 
+// Head pose: written by the XR code (render thread), consumed by the engine's
+// camera update (possibly another thread).
+static SRWLOCK g_headLock = SRWLOCK_INIT;
+static EyePose g_pendingHead;   // latest prediction
+static EyePose g_appliedHead;   // what the engine camera was actually turned by
+
+void StereoSetHeadPose(const float rot[9], const float pos[3])
+{
+    AcquireSRWLockExclusive(&g_headLock);
+    g_pendingHead.set = true;
+    memcpy(g_pendingHead.rot, rot, sizeof(g_pendingHead.rot));
+    memcpy(g_pendingHead.pos, pos, sizeof(g_pendingHead.pos));
+    ReleaseSRWLockExclusive(&g_headLock);
+}
+
+void StereoHeadNotApplied()
+{
+    AcquireSRWLockExclusive(&g_headLock);
+    if (g_appliedHead.set) { g_appliedHead.set = false; ++g_key; }
+    ReleaseSRWLockExclusive(&g_headLock);
+}
+
+bool StereoTakeHeadForCamera(const float* cam, float rot[9], float pos[3])
+{
+    AcquireSRWLockExclusive(&g_headLock);
+    EyePose h = g_pendingHead;
+    g_appliedHead = h;
+    ++g_key;
+    ReleaseSRWLockExclusive(&g_headLock);
+    if (!h.set) return false;
+
+    // The engine camera's axes vs. what the draws show: expect x = screen
+    // right, y = screen up, and z = either back (OpenXR-like) or forward.
+    float dx = cam[0] * g_right[0] + cam[1] * g_right[1] + cam[2] * g_right[2];
+    float dy = cam[4] * g_up[0] + cam[5] * g_up[1] + cam[6] * g_up[2];
+    float dz = cam[8] * g_fwd[0] + cam[9] * g_fwd[1] + cam[10] * g_fwd[2];
+    static int logged = 0;
+    if (logged++ < 3)
+        Log("[stereo] engine camera axes vs screen: x.right=%.3f y.up=%.3f z.fwd=%.3f", dx, dy, dz);
+
+    // OpenXR pose is x right / y up / z back. If the engine camera's z points
+    // forward, flip z (conjugate by diag(1,1,-1)).
+    const float s[3] = { 1, 1, dz > 0 ? -1.0f : 1.0f };
+    for (int i = 0; i < 3; ++i)
+    {
+        for (int j = 0; j < 3; ++j) rot[i * 3 + j] = s[i] * h.rot[i * 3 + j] * s[j];
+        pos[i] = s[i] * h.pos[i] * g_cfg.worldScale;
+    }
+    return true;
+}
+
 void StereoSetDisplayFov(int eyeIndex, float tanL, float tanR, float tanU, float tanD, float cropFracX, float cropFracY)
 {
     DisplayFov& d = g_display[eyeIndex];
@@ -182,20 +233,39 @@ static void BuildK()
     float eyeCanon[3] = {};
     if (g_activePose.set)
     {
-        // OpenXR eye pose (R, p) in x right / y up / z back; canonical flips z.
-        // View = [R^T | -R^T p]; T = S * View * S, S = diag(1, 1, -1).
-        const float* R = g_activePose.rot;
-        float p[3] = { g_activePose.pos[0] * g_cfg.worldScale, g_activePose.pos[1] * g_cfg.worldScale, g_activePose.pos[2] * g_cfg.worldScale };
+        // OpenXR poses (R, p) in x right / y up / z back; canonical flips z.
+        // The rendered camera already includes the applied head pose H, so
+        // the eye view relative to it is inverse(E) * H = [Re^T Rh | Re^T (ph - pe)].
+        // T = S * that * S, S = diag(1, 1, -1).
+        AcquireSRWLockShared(&g_headLock);
+        EyePose h = g_appliedHead;
+        ReleaseSRWLockShared(&g_headLock);
+        static const float I3[9] = { 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+        const float* Rh = h.set ? h.rot : I3;
+        float ph[3] = {};
+        if (h.set) for (int i = 0; i < 3; ++i) ph[i] = h.pos[i] * g_cfg.worldScale;
+
+        const float* Re = g_activePose.rot;
+        float pe[3] = { g_activePose.pos[0] * g_cfg.worldScale, g_activePose.pos[1] * g_cfg.worldScale, g_activePose.pos[2] * g_cfg.worldScale };
         const float s[3] = { 1, 1, -1 };
         for (int i = 0; i < 3; ++i)
+        {
             for (int j = 0; j < 3; ++j)
-                t.m[i][j] = s[i] * R[j * 3 + i] * s[j];   // S R^T S
+            {
+                float v = 0;
+                for (int k = 0; k < 3; ++k) v += Re[k * 3 + i] * Rh[k * 3 + j]; // (Re^T Rh)[i][j]
+                t.m[i][j] = s[i] * v * s[j];
+            }
+            float v = 0;
+            for (int k = 0; k < 3; ++k) v += Re[k * 3 + i] * (ph[k] - pe[k]);
+            t.m[i][3] = s[i] * v;
+        }
+        // Eye position relative to the rendered camera, in its canonical axes.
         for (int i = 0; i < 3; ++i)
         {
             float v = 0;
-            for (int j = 0; j < 3; ++j) v -= R[j * 3 + i] * p[j]; // -R^T p
-            t.m[i][3] = s[i] * v;
-            eyeCanon[i] = s[i] * p[i];
+            for (int k = 0; k < 3; ++k) v += Rh[k * 3 + i] * (pe[k] - ph[k]);
+            eyeCanon[i] = s[i] * v;
         }
     }
     else
