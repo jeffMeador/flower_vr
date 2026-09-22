@@ -6,8 +6,10 @@
 // and, every Present, copies the frame the game just rendered (one eye under
 // alternate-eye stereo) into that eye's swapchain, then submits both eyes.
 //
-// For now the layer is head-locked (VIEW space): the game camera does not
-// follow the HMD yet; the image is shown with the game's own FOV.
+// Head tracking: each frame the predicted eye poses (relative to a yaw-only
+// reference, recentered at start / F6 / SteamVR recenter) are handed to the
+// stereo code, and images are submitted in LOCAL space with the exact pose
+// they were rendered with.
 
 void XrInit(ID3D11Device* device, const wchar_t* dllDir);
 

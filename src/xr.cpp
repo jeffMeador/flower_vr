@@ -21,7 +21,7 @@ static PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr_ = nullptr;
     X(xrPollEvent) X(xrBeginSession) X(xrEndSession) X(xrWaitFrame) X(xrBeginFrame) \
     X(xrEndFrame) X(xrLocateViews) X(xrAcquireSwapchainImage) X(xrWaitSwapchainImage) \
     X(xrReleaseSwapchainImage) X(xrEnumerateViewConfigurationViews) X(xrResultToString) \
-    X(xrGetD3D11GraphicsRequirementsKHR)
+    X(xrGetD3D11GraphicsRequirementsKHR) X(xrLocateSpace)
 
 #define DECLARE(name) static PFN_##name name##_ = nullptr;
 XR_FUNCS(DECLARE)
@@ -38,6 +38,9 @@ static XrInstance g_instance = XR_NULL_HANDLE;
 static XrSystemId g_system = XR_NULL_SYSTEM_ID;
 static XrSession g_session = XR_NULL_HANDLE;
 static XrSpace g_viewSpace = XR_NULL_HANDLE;
+static XrSpace g_localSpace = XR_NULL_HANDLE;
+static XrFovf g_eyeFov[2] = {};
+static bool g_recenterPending = false;
 static XrSessionState g_state = XR_SESSION_STATE_UNKNOWN;
 static bool g_sessionRunning = false;
 
@@ -181,6 +184,8 @@ static bool CreateSession(IDXGISwapChain* gameSwapChain)
     rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_VIEW;
     rs.poseInReferenceSpace.orientation.w = 1.0f;
     XR_CHECK(xrCreateReferenceSpace_(g_session, &rs, &g_viewSpace));
+    rs.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_LOCAL;
+    XR_CHECK(xrCreateReferenceSpace_(g_session, &rs, &g_localSpace));
 
     // Swapchain format: sRGB twin of the game's backbuffer format, so a raw
     // copy is legal (same typeless family) and the compositor decodes gamma.
@@ -276,6 +281,10 @@ static void PollEvents()
                 Log("[xr] session lost/exiting; VR output stopped");
             }
         }
+        else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING)
+        {
+            g_recenterPending = true; // user recentered in SteamVR
+        }
         else if (ev.type == XR_TYPE_EVENT_DATA_INSTANCE_LOSS_PENDING)
         {
             g_sessionRunning = false;
@@ -308,6 +317,51 @@ static void CopyToEye(int e, ID3D11DeviceContext* ctx, ID3D11Texture2D* src, con
     sc.everReleased = true;
 }
 
+// ---- small quaternion helpers (x, y, z, w) ----
+static XrQuaternionf QMul(const XrQuaternionf& a, const XrQuaternionf& b)
+{
+    return { a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+             a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+             a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+             a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z };
+}
+static XrQuaternionf QConj(const XrQuaternionf& q) { return { -q.x, -q.y, -q.z, q.w }; }
+static XrVector3f QRot(const XrQuaternionf& q, const XrVector3f& v)
+{
+    XrQuaternionf p{ v.x, v.y, v.z, 0 };
+    XrQuaternionf r = QMul(QMul(q, p), QConj(q));
+    return { r.x, r.y, r.z };
+}
+static void QToMat(const XrQuaternionf& q, float m[9]) // row-major
+{
+    float x = q.x, y = q.y, z = q.z, w = q.w;
+    m[0] = 1 - 2 * (y * y + z * z); m[1] = 2 * (x * y - z * w);     m[2] = 2 * (x * z + y * w);
+    m[3] = 2 * (x * y + z * w);     m[4] = 1 - 2 * (x * x + z * z); m[5] = 2 * (y * z - x * w);
+    m[6] = 2 * (x * z - y * w);     m[7] = 2 * (y * z + x * w);     m[8] = 1 - 2 * (x * x + y * y);
+}
+
+// Reference ("where the game camera is") in LOCAL space: yaw-only
+// orientation + position of the head at recenter time.
+static bool g_refSet = false;
+static XrPosef g_ref;
+// Eye poses (LOCAL space) handed to the game for the frame being rendered
+// now, and the ones each swapchain image was actually rendered with.
+static XrPosef g_givenPose[2];
+static bool g_givenValid = false;
+static XrPosef g_imagePose[2];
+static bool g_imagePoseValid[2] = {};
+
+static void Recenter(const XrPosef& head)
+{
+    XrVector3f f = QRot(head.orientation, { 0, 0, -1 });
+    float yaw = atan2f(-f.x, -f.z);
+    g_ref.orientation = { 0, sinf(yaw * 0.5f), 0, cosf(yaw * 0.5f) };
+    g_ref.position = head.position;
+    g_refSet = true;
+    Log("[xr] recentered: yaw %.1f deg, head at (%.2f %.2f %.2f)", yaw * 57.2958f,
+        head.position.x, head.position.y, head.position.z);
+}
+
 static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
 {
     XrFrameWaitInfo fwi{ XR_TYPE_FRAME_WAIT_INFO };
@@ -329,24 +383,8 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
         D3D11_TEXTURE2D_DESC desc = {};
         bb->GetDesc(&desc);
 
-        XrViewLocateInfo li{ XR_TYPE_VIEW_LOCATE_INFO };
-        li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
-        li.displayTime = fs.predictedDisplayTime;
-        li.space = g_viewSpace;
-        XrViewState vs{ XR_TYPE_VIEW_STATE };
-        XrView views[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
-        uint32_t vc = 0;
-        bool located = XR_SUCCEEDED(xrLocateViews_(g_session, &li, &vs, 2, &vc, views)) && vc == 2;
-        if (located)
-        {
-            // From the next frame on, the game renders each eye with the
-            // headset's FOV into the centered square we copy out.
-            for (int e = 0; e < 2; ++e)
-                StereoSetDisplayFov(e, tanf(views[e].fov.angleLeft), tanf(views[e].fov.angleRight),
-                    tanf(views[e].fov.angleUp), tanf(views[e].fov.angleDown),
-                    (float)g_size / desc.Width, (float)g_size / desc.Height);
-        }
-
+        // 1. The frame just finished was rendered with the poses we handed
+        //    out last time: copy it to its eye and remember that pose.
         ID3D11DeviceContext* ctx = nullptr;
         g_device->GetImmediateContext(&ctx);
         ID3D11Texture2D* src = bb;
@@ -355,30 +393,89 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
             ctx->ResolveSubresource(g_resolve, 0, bb, 0, desc.Format);
             src = g_resolve;
         }
-        if (renderedEye <= 0) CopyToEye(0, ctx, src, desc);
-        if (renderedEye >= 0) CopyToEye(1, ctx, src, desc);
+        for (int e = 0; e < 2; ++e)
+        {
+            if ((e == 0 && renderedEye > 0) || (e == 1 && renderedEye < 0)) continue;
+            CopyToEye(e, ctx, src, desc);
+            if (g_givenValid)
+            {
+                // Mono frames were rendered from the left eye's pose.
+                g_imagePose[e] = g_givenPose[renderedEye == 0 ? 0 : e];
+                g_imagePoseValid[e] = true;
+            }
+        }
         ctx->Release();
         bb->Release();
 
-        if (located && g_eyes[0].everReleased && g_eyes[1].everReleased)
+        // 2. Predict where the eyes will be when the *next* frame shows, and
+        //    hand that to the game (relative to the recentered reference).
+        XrViewLocateInfo li{ XR_TYPE_VIEW_LOCATE_INFO };
+        li.viewConfigurationType = XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO;
+        li.displayTime = fs.predictedDisplayTime + fs.predictedDisplayPeriod;
+        li.space = g_localSpace;
+        XrViewState vs{ XR_TYPE_VIEW_STATE };
+        XrView views[2] = { { XR_TYPE_VIEW }, { XR_TYPE_VIEW } };
+        uint32_t vc = 0;
+        bool located = XR_SUCCEEDED(xrLocateViews_(g_session, &li, &vs, 2, &vc, views)) && vc == 2 &&
+            (vs.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT);
+
+        XrSpaceLocation head{ XR_TYPE_SPACE_LOCATION };
+        bool headOk = XR_SUCCEEDED(xrLocateSpace_(g_viewSpace, g_localSpace, li.displayTime, &head)) &&
+            (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
+        if (headOk && (!g_refSet || (GetAsyncKeyState(VK_F6) & 1) || g_recenterPending))
+        {
+            Recenter(head.pose);
+            g_recenterPending = false;
+        }
+
+        if (located && g_refSet)
+        {
+            XrQuaternionf refInv = QConj(g_ref.orientation);
+            // Debug (F5): pretend the head is turned 30 deg to the right, to verify
+            // rotation direction without wearing the headset.
+            static bool fakeTurn = false;
+            if (GetAsyncKeyState(VK_F5) & 1) { fakeTurn = !fakeTurn; Log("[xr] F5: fake 30 deg right turn = %d", fakeTurn); }
+            if (fakeTurn) refInv = QMul({ 0, sinf(-0.2618f), 0, cosf(-0.2618f) }, refInv);
+            for (int e = 0; e < 2; ++e)
+            {
+                StereoSetDisplayFov(e, tanf(views[e].fov.angleLeft), tanf(views[e].fov.angleRight),
+                    tanf(views[e].fov.angleUp), tanf(views[e].fov.angleDown),
+                    (float)g_size / desc.Width, (float)g_size / desc.Height);
+
+                XrQuaternionf q = QMul(refInv, views[e].pose.orientation);
+                XrVector3f d = { views[e].pose.position.x - g_ref.position.x,
+                                 views[e].pose.position.y - g_ref.position.y,
+                                 views[e].pose.position.z - g_ref.position.z };
+                XrVector3f p = QRot(refInv, d);
+                float rot[9], pos[3] = { p.x, p.y, p.z };
+                QToMat(q, rot);
+                StereoSetEyePose(e, rot, pos);
+                g_givenPose[e] = views[e].pose;
+                g_eyeFov[e] = views[e].fov;
+            }
+            g_givenValid = true;
+        }
+
+        // 3. Submit both eyes with the exact pose each image was rendered with.
+        if (g_imagePoseValid[0] && g_imagePoseValid[1] && g_eyes[0].everReleased && g_eyes[1].everReleased)
         {
             for (int e = 0; e < 2; ++e)
             {
-                projViews[e].pose = views[e].pose;
-                projViews[e].fov = views[e].fov;
+                projViews[e].pose = g_imagePose[e];
+                projViews[e].fov = g_eyeFov[e];
                 projViews[e].subImage.swapchain = g_eyes[e].handle;
                 projViews[e].subImage.imageRect.offset = { 0, 0 };
                 projViews[e].subImage.imageRect.extent = { (int32_t)g_size, (int32_t)g_size };
             }
-            layer.space = g_viewSpace;
+            layer.space = g_localSpace;
             layer.viewCount = 2;
             layer.views = projViews;
             layerCount = 1;
 
             if (g_submitted++ % 900 == 0)
                 Log("[xr] submitting: eye fov L%.1f R%.1f U%.1f D%.1f deg, game xs=%.3f ys=%.3f, eye=%d, period %.2f ms",
-                    views[0].fov.angleLeft * 57.2958f, views[0].fov.angleRight * 57.2958f,
-                    views[0].fov.angleUp * 57.2958f, views[0].fov.angleDown * 57.2958f,
+                    g_eyeFov[0].angleLeft * 57.2958f, g_eyeFov[0].angleRight * 57.2958f,
+                    g_eyeFov[0].angleUp * 57.2958f, g_eyeFov[0].angleDown * 57.2958f,
                     xs, ys, renderedEye, fs.predictedDisplayPeriod / 1e6);
         }
     }
@@ -394,7 +491,6 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
         if (errs++ < 10) Log("[xr] xrEndFrame failed: %s", ResultStr(r));
     }
 }
-
 void XrSubmitFrame(IDXGISwapChain* swapChain, int renderedEye)
 {
     switch (g_stage)
