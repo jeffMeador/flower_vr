@@ -42,6 +42,8 @@ void StereoLoadConfig(const wchar_t* dllDir)
     g_cfg.enabled = ReadIniFloat(L"enabled", 1.0f) != 0.0f;
     g_cfg.separation = ReadIniFloat(L"separation", g_cfg.separation);
     g_cfg.worldScale = ReadIniFloat(L"worldScale", g_cfg.worldScale);
+    if (g_cfg.worldScale < 0.1f) g_cfg.worldScale = 0.1f;
+    if (g_cfg.worldScale > 10.0f) g_cfg.worldScale = 10.0f;
     g_cfg.shiftEyePosition = ReadIniFloat(L"shiftEyePosition", 0.0f) != 0.0f;
     wchar_t mode[32];
     GetPrivateProfileStringW(L"stereo", L"render", L"alternate", mode, 32, g_iniPath);
@@ -61,6 +63,12 @@ static void SaveIni(const wchar_t* key, const wchar_t* value)
 
 static void SaveScale()
 {
+    // Keep world scale sane: it once collapsed to 0.0012 (flat image, no
+    // head-movement parallax) when each key press fired several times.
+    if (g_cfg.worldScale < 0.1f) g_cfg.worldScale = 0.1f;
+    if (g_cfg.worldScale > 10.0f) g_cfg.worldScale = 10.0f;
+    if (g_cfg.separation < 0.0065f) g_cfg.separation = 0.0065f;
+    if (g_cfg.separation > 0.65f) g_cfg.separation = 0.65f;
     wchar_t v[32];
     swprintf_s(v, L"%.4f", g_cfg.worldScale); SaveIni(L"worldScale", v);
     swprintf_s(v, L"%.4f", g_cfg.separation); SaveIni(L"separation", v);
