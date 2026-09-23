@@ -37,6 +37,19 @@ Flower.exe.
 | `render` (double) | — | `alternate` = old alternate-eye mode. |
 | — | F6 | Recenter. |
 | — | F12 | Dump both eyes of one frame (`frame_N.bmp`, `frame_N_R.bmp`). |
+
+**Motion controllers** (Oculus Touch verified; Index/Vive/WMR/simple bound):
+
+| Control | Action |
+|---|---|
+| Point right controller | Steer (default [xr] steering=motion; 30° from neutral = full) |
+| Thumbstick click | Re-center motion steering (neutral = current aim) |
+| Trigger / grip / A / X (hold) | Fly |
+| B / Y | Toggle motion ↔ thumbstick steering (saved) |
+| Thumbstick | Steer (in motion mode too; larger deflection wins) |
+| Menu | Pause |
+
+Title, menu and videos show on a floating virtual screen; full VR starts with the level's 3D camera.
 ## Confirmed facts
 
 - Renderer: DirectX 11 (`d3d11.dll` + `dxgi.dll` + `D3DCOMPILER_47.dll`), x64,
