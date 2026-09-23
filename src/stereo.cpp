@@ -90,6 +90,13 @@ void StereoFrameBoundary()
     ++g_frame;
     ++g_key;
     g_eye = -g_eye;
+    static bool wasFresh = false;
+    bool fresh = g_projKnown && g_frame - g_projFrame < 10;
+    if (fresh != wasFresh)
+    {
+        wasFresh = fresh;
+        Log("[stereo] frame %llu: %s", (unsigned long long)g_frame, fresh ? "3D camera live -> full VR" : "no 3D camera -> virtual screen");
+    }
     g_activePoses[0] = g_pendingPose[0];
     g_activePoses[1] = g_pendingPose[1];
     if (!g_cfg.doubleRender) g_renderEye = EyeIndex();
