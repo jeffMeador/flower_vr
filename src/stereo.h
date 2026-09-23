@@ -30,6 +30,8 @@ struct StereoConfig
     bool  doubleRender = false;      // [stereo] render=double: both eyes every frame
     int   lensMode = 0;              // game fisheye post pass: 0 game, 1 fixed, 2 off
     bool  lensLockPending = false;   // fixed: lock at the next observed strength
+    bool  motionBlur = false;        // game motion blur while in VR
+    bool  depthOfField = false;      // game depth-of-field blur while in VR
 };
 
 StereoConfig& Stereo();

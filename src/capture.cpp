@@ -15,7 +15,9 @@
 #include <string>
 
 // What to do with one cbuffer variable when rendering a given eye.
-enum class PatchKind { Clip, View, EyePos, LensFov };
+// OldClip = previous frame's MVP (motion blur); with motion blur off in VR it's
+// set equal to this frame's (patched) MVP, so nothing appears to move.
+enum class PatchKind { Clip, OldClip, View, EyePos, LensFov };
 
 struct PatchVar
 {
@@ -60,7 +62,14 @@ struct ContextState
 {
     ID3D11VertexShader* currentVS = nullptr;
     ID3D11Resource* currentSlot0CB = nullptr;
+    ID3D11PixelShader* currentPS = nullptr;
+    ID3D11Resource* psCB[4] = {};
 };
+
+// Pixel shaders with depth of field ("blurZRanges": blur = clamp(max((Z-x)*y,
+// (Z-z)*w))); with DoF off in VR y and w are zeroed, i.e. always sharp.
+struct PixelDof { UINT slot; UINT offset; };
+static std::unordered_map<ID3D11PixelShader*, PixelDof> g_psDof;
 static std::unordered_map<ID3D11DeviceContext*, ContextState> g_contextState;
 
 static std::atomic<uint64_t> g_captureFrame{ 0 };
@@ -151,7 +160,9 @@ static void ReflectAndCacheOffsets(ID3D11VertexShader* shader, const void* bytec
                 offsets.mvpOffset = varDesc.StartOffset;
                 offsets.patches.push_back({ PatchKind::Clip, varDesc.StartOffset });
             }
-            else if (n == "oldmodelviewproj" || n == "viewprojection" || n == "viewprojmtx")
+            else if (n == "oldmodelviewproj")
+                offsets.patches.push_back({ PatchKind::OldClip, varDesc.StartOffset });
+            else if (n == "viewprojection" || n == "viewprojmtx")
                 offsets.patches.push_back({ PatchKind::Clip, varDesc.StartOffset });
             else if (n == "modelview")
                 offsets.patches.push_back({ PatchKind::View, varDesc.StartOffset });
@@ -213,6 +224,58 @@ static void STDMETHODCALLTYPE Hook_VSSetConstantBuffers(ID3D11DeviceContext* sel
     if (startSlot <= 0 && 0 < startSlot + numBuffers && buffers)
         g_contextState[self].currentSlot0CB = buffers[0 - startSlot];
     g_realVSSetConstantBuffers(self, startSlot, numBuffers, buffers);
+}
+
+// ---- pixel shaders: find depth-of-field constants ----
+using CreatePixelShader_t = HRESULT(STDMETHODCALLTYPE*)(ID3D11Device*, const void*, SIZE_T, ID3D11ClassLinkage*, ID3D11PixelShader**);
+using PSSetShader_t = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, ID3D11PixelShader*, ID3D11ClassInstance* const*, UINT);
+using PSSetConstantBuffers_t = void(STDMETHODCALLTYPE*)(ID3D11DeviceContext*, UINT, UINT, ID3D11Buffer* const*);
+static CreatePixelShader_t g_realCreatePixelShader = nullptr;
+static PSSetShader_t g_realPSSetShader = nullptr;
+static PSSetConstantBuffers_t g_realPSSetConstantBuffers = nullptr;
+
+static HRESULT STDMETHODCALLTYPE Hook_CreatePixelShader(ID3D11Device* self, const void* bytecode, SIZE_T len, ID3D11ClassLinkage* linkage, ID3D11PixelShader** out)
+{
+    HRESULT hr = g_realCreatePixelShader(self, bytecode, len, linkage, out);
+    if (FAILED(hr) || !out || !*out) return hr;
+    ID3D11ShaderReflection* refl = nullptr;
+    if (FAILED(D3DReflect(bytecode, len, IID_ID3D11ShaderReflection, (void**)&refl)) || !refl) return hr;
+    D3D11_SHADER_DESC sd = {};
+    refl->GetDesc(&sd);
+    for (UINT cb = 0; cb < sd.ConstantBuffers; ++cb)
+    {
+        ID3D11ShaderReflectionConstantBuffer* cbr = refl->GetConstantBufferByIndex(cb);
+        D3D11_SHADER_BUFFER_DESC cbd = {};
+        cbr->GetDesc(&cbd);
+        D3D11_SHADER_INPUT_BIND_DESC bd = {};
+        if (FAILED(refl->GetResourceBindingDescByName(cbd.Name, &bd)) || bd.BindPoint >= 4) continue;
+        for (UINT v = 0; v < cbd.Variables; ++v)
+        {
+            D3D11_SHADER_VARIABLE_DESC vd = {};
+            cbr->GetVariableByIndex(v)->GetDesc(&vd);
+            if (Lower(vd.Name) == "blurzranges" && (vd.uFlags & D3D_SVF_USED))
+            {
+                g_psDof[*out] = { bd.BindPoint, vd.StartOffset };
+                Log("[capture] pixel shader with depth of field: blurZRanges in slot %u @%u", bd.BindPoint, vd.StartOffset);
+            }
+        }
+    }
+    refl->Release();
+    return hr;
+}
+
+static void STDMETHODCALLTYPE Hook_PSSetShader(ID3D11DeviceContext* self, ID3D11PixelShader* shader, ID3D11ClassInstance* const* inst, UINT n)
+{
+    g_contextState[self].currentPS = shader;
+    g_realPSSetShader(self, shader, inst, n);
+}
+
+static void STDMETHODCALLTYPE Hook_PSSetConstantBuffers(ID3D11DeviceContext* self, UINT start, UINT n, ID3D11Buffer* const* buffers)
+{
+    ContextState& st = g_contextState[self];
+    for (UINT i = 0; i < n && buffers; ++i)
+        if (start + i < 4) st.psCB[start + i] = buffers[i];
+    g_realPSSetConstantBuffers(self, start, n, buffers);
 }
 
 static void RecordGameWrite(ID3D11Resource* resource, const void* src)
@@ -364,6 +427,19 @@ static void PrepareDraw(ID3D11DeviceContext* self)
                 any = true;
                 break;
             }
+            case PatchKind::OldClip:
+            {
+                Mat4 m; memcpy(&m, f, 64);
+                if (!IsPerspective(m)) { g_statOrtho++; break; }
+                if (!Stereo().motionBlur && off.hasMVP && off.mvpOffset + 64 <= patched.size())
+                {
+                    // Previous-frame MVP := this frame's MVP for this eye -> no motion blur.
+                    memcpy(f, orig.data() + off.mvpOffset, 64);
+                }
+                StereoPatchClip(f);
+                any = true;
+                break;
+            }
             case PatchKind::View:
                 StereoPatchView(f);
                 any = true;
@@ -410,6 +486,32 @@ static void PrepareDraw(ID3D11DeviceContext* self)
     s.patchedKey = key;
     g_statPatched++;
 }
+// Depth of field off in VR: if the bound pixel shader reads blurZRanges, write
+// its buffer with the blur slopes zeroed (always sharp). Eye-independent.
+static ShaderOffsets g_dofTag; // identifies "DoF-patched" in the buffer cache
+static void PrepareDof(ID3D11DeviceContext* self)
+{
+    if (Stereo().depthOfField || StereoPatchKey() == 0) return;
+    ContextState& st = g_contextState[self];
+    auto it = g_psDof.find(st.currentPS);
+    if (it == g_psDof.end()) return;
+    ID3D11Resource* buf = st.psCB[it->second.slot];
+    auto sh = g_cbShadow.find(buf);
+    if (sh == g_cbShadow.end() || !sh->second.valid) return;
+    BufferShadow& s = sh->second;
+    if (s.patchedGen == s.gen && s.patchedLayout == &g_dofTag) return; // already sharp
+    if (it->second.offset + 16 > s.data.size()) return;
+    static std::vector<uint8_t> patched;
+    patched = s.data;
+    float* f = reinterpret_cast<float*>(patched.data() + it->second.offset);
+    f[1] = 0.0f; // near-blur slope
+    f[3] = 0.0f; // far-blur slope
+    WriteBuffer(self, buf, s, patched.data());
+    s.patchedGen = s.gen;
+    s.patchedLayout = &g_dofTag;
+    s.patchedKey = 0;
+}
+
 // Issue one game draw: patched for the current eye (alternate-eye mode), or
 // twice - left eye into the game's targets, right eye into their twins.
 template <class F>
@@ -418,16 +520,19 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw)
     if (!Stereo().doubleRender || ShadowBypassed())
     {
         PrepareDraw(self);
+        PrepareDof(self);
         draw();
         return;
     }
     StereoSetRenderEye(0);
     PrepareDraw(self);
+    PrepareDof(self);
     draw();
     if (ShadowBindRightEye(self))
     {
         StereoSetRenderEye(1);
         PrepareDraw(self);
+        PrepareDof(self);
         draw();
         ShadowRestore(self);
         StereoSetRenderEye(0);
@@ -522,6 +627,9 @@ void InstallCaptureHooks(ID3D11Device* device, ID3D11DeviceContext* context)
     void** contextVT = *reinterpret_cast<void***>(context);
 
     InlineHook(deviceVT[12], (void*)&Hook_CreateVertexShader, (void**)&g_realCreateVertexShader, "CreateVertexShader");
+    InlineHook(deviceVT[15], (void*)&Hook_CreatePixelShader, (void**)&g_realCreatePixelShader, "CreatePixelShader");
+    InlineHook(contextVT[9], (void*)&Hook_PSSetShader, (void**)&g_realPSSetShader, "PSSetShader");
+    InlineHook(contextVT[16], (void*)&Hook_PSSetConstantBuffers, (void**)&g_realPSSetConstantBuffers, "PSSetConstantBuffers");
 
     InlineHook(contextVT[7], (void*)&Hook_VSSetConstantBuffers, (void**)&g_realVSSetConstantBuffers, "VSSetConstantBuffers");
     InlineHook(contextVT[11], (void*)&Hook_VSSetShader, (void**)&g_realVSSetShader, "VSSetShader");
