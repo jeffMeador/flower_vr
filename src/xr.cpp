@@ -29,7 +29,7 @@ static PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr_ = nullptr;
     X(xrGetD3D11GraphicsRequirementsKHR) X(xrLocateSpace) \
     X(xrStringToPath) X(xrCreateActionSet) X(xrCreateAction) X(xrSuggestInteractionProfileBindings) \
     X(xrAttachSessionActionSets) X(xrSyncActions) X(xrGetActionStateFloat) X(xrGetActionStateVector2f) \
-    X(xrGetActionStateBoolean) X(xrCreateActionSpace)
+    X(xrGetActionStateBoolean) X(xrCreateActionSpace) X(xrGetCurrentInteractionProfile) X(xrPathToString)
 
 #define DECLARE(name) static PFN_##name name##_ = nullptr;
 XR_FUNCS(DECLARE)
@@ -488,7 +488,14 @@ static void PollControllers(XrTime time)
     XrActionsSyncInfo si{ XR_TYPE_ACTIONS_SYNC_INFO };
     si.countActiveActionSets = 1;
     si.activeActionSets = &active;
-    if (XR_FAILED(xrSyncActions_(g_session, &si))) return;
+    XrResult sr = xrSyncActions_(g_session, &si);
+    if (XR_FAILED(sr) || sr == XR_SESSION_NOT_FOCUSED)
+    {
+        static XrResult last = XR_SUCCESS;
+        if (sr != last) Log("[xr] xrSyncActions: %s", ResultStr(sr));
+        last = sr;
+        if (XR_FAILED(sr)) return;
+    }
 
     float lx = 0, ly = 0, trigger = 0;
     bool a = false, b = false, menu = false;
@@ -519,6 +526,29 @@ static void PollControllers(XrTime time)
             if (tx * tx + ty * ty > lx * lx + ly * ly) { lx = tx; ly = ty; }
         }
         else gripping[h] = false;
+    }
+
+    // Diagnostics: which controller type SteamVR reports, and live values.
+    static DWORD lastDiag = 0;
+    if (GetTickCount() - lastDiag > 3000)
+    {
+        lastDiag = GetTickCount();
+        char prof[2][XR_MAX_PATH_LENGTH] = { "none", "none" };
+        for (int h = 0; h < 2; ++h)
+        {
+            XrInteractionProfileState ps{ XR_TYPE_INTERACTION_PROFILE_STATE };
+            if (XR_SUCCEEDED(xrGetCurrentInteractionProfile_(g_session, g_hand[h], &ps)) && ps.interactionProfile != XR_NULL_PATH)
+            {
+                uint32_t n = 0;
+                xrPathToString_(g_instance, ps.interactionProfile, XR_MAX_PATH_LENGTH, &n, prof[h]);
+            }
+        }
+        XrActionStateGetInfo gi{ XR_TYPE_ACTION_STATE_GET_INFO };
+        gi.action = g_actSteer; gi.subactionPath = g_hand[1];
+        XrActionStateVector2f st{ XR_TYPE_ACTION_STATE_VECTOR2F };
+        xrGetActionStateVector2f_(g_session, &gi, &st);
+        Log("[xr] controllers: left=%s right=%s | steerR active=%d | stick (%.2f %.2f) trigger %.2f a=%d b=%d menu=%d",
+            prof[0], prof[1], st.isActive, lx, ly, trigger, a, b, menu);
     }
 
     WORD buttons = 0;
@@ -573,6 +603,86 @@ static void Recenter(const XrPosef& head)
         head.position.x, head.position.y, head.position.z);
 }
 
+// ---- virtual screen for menus / title / videos ----
+// When the game shows no 3D camera, its whole image goes onto a quad floating
+// in front of the (recentered) user.
+static const float kScreenDistance = 2.0f, kScreenWidth = 2.4f;
+static EyeSwapchain g_screen;
+static UINT g_screenW = 0, g_screenH = 0;
+
+static bool SubmitScreen(IDXGISwapChain* swapChain, const XrFrameState& fs, XrCompositionLayerQuad& layer)
+{
+    ID3D11Texture2D* bb = nullptr;
+    if (FAILED(swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb)) || !bb) return false;
+    D3D11_TEXTURE2D_DESC desc = {};
+    bb->GetDesc(&desc);
+
+    if (!g_screen.handle)
+    {
+        XrSwapchainCreateInfo sc{ XR_TYPE_SWAPCHAIN_CREATE_INFO };
+        sc.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+        sc.format = g_format;
+        sc.sampleCount = 1;
+        sc.width = desc.Width;
+        sc.height = desc.Height;
+        sc.faceCount = 1; sc.arraySize = 1; sc.mipCount = 1;
+        XrResult r = xrCreateSwapchain_(g_session, &sc, &g_screen.handle);
+        if (XR_FAILED(r))
+        {
+            Log("[xr] screen swapchain: %s", ResultStr(r));
+            g_screen.handle = XR_NULL_HANDLE;
+            bb->Release();
+            return false;
+        }
+        uint32_t count = 0;
+        xrEnumerateSwapchainImages_(g_screen.handle, 0, &count, nullptr);
+        std::vector<XrSwapchainImageD3D11KHR> imgs(count, { XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR });
+        xrEnumerateSwapchainImages_(g_screen.handle, count, &count, (XrSwapchainImageBaseHeader*)imgs.data());
+        for (auto& i : imgs) g_screen.images.push_back(i.texture);
+        g_screenW = desc.Width; g_screenH = desc.Height;
+        Log("[xr] virtual screen %ux%u for menus/videos", g_screenW, g_screenH);
+    }
+
+    // Keep the screen in front of the user: recenter once if never done.
+    XrSpaceLocation head{ XR_TYPE_SPACE_LOCATION };
+    if (!g_refSet && XR_SUCCEEDED(xrLocateSpace_(g_viewSpace, g_localSpace, fs.predictedDisplayTime, &head)) &&
+        (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT))
+        Recenter(head.pose);
+    if (!g_refSet) { bb->Release(); return false; }
+
+    uint32_t idx = 0;
+    XrSwapchainImageAcquireInfo ai{ XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+    if (XR_FAILED(xrAcquireSwapchainImage_(g_screen.handle, &ai, &idx))) { bb->Release(); return false; }
+    XrSwapchainImageWaitInfo wi{ XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+    wi.timeout = XR_INFINITE_DURATION;
+    xrWaitSwapchainImage_(g_screen.handle, &wi);
+    ID3D11DeviceContext* ctx = nullptr;
+    g_device->GetImmediateContext(&ctx);
+    ID3D11Texture2D* src = bb;
+    if (g_resolve && desc.SampleDesc.Count > 1)
+    {
+        ctx->ResolveSubresource(g_resolve, 0, bb, 0, desc.Format);
+        src = g_resolve;
+    }
+    if (desc.Width == g_screenW && desc.Height == g_screenH)
+        ctx->CopySubresourceRegion(g_screen.images[idx], 0, 0, 0, 0, src, 0, nullptr);
+    ctx->Release();
+    bb->Release();
+    XrSwapchainImageReleaseInfo ri{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+    xrReleaseSwapchainImage_(g_screen.handle, &ri);
+
+    XrVector3f fwd = QRot(g_ref.orientation, { 0, 0, -kScreenDistance });
+    layer.space = g_localSpace;
+    layer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+    layer.subImage.swapchain = g_screen.handle;
+    layer.subImage.imageRect.offset = { 0, 0 };
+    layer.subImage.imageRect.extent = { (int32_t)g_screenW, (int32_t)g_screenH };
+    layer.pose.orientation = g_ref.orientation;
+    layer.pose.position = { g_ref.position.x + fwd.x, g_ref.position.y + fwd.y, g_ref.position.z + fwd.z };
+    layer.size = { kScreenWidth, kScreenWidth * g_screenH / g_screenW };
+    return true;
+}
+
 static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
 {
     XrFrameWaitInfo fwi{ XR_TYPE_FRAME_WAIT_INFO };
@@ -580,14 +690,18 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
     if (XR_FAILED(xrWaitFrame_(g_session, &fwi, &fs))) return;
     XrFrameBeginInfo fbi{ XR_TYPE_FRAME_BEGIN_INFO };
     if (XR_FAILED(xrBeginFrame_(g_session, &fbi))) return;
+    PollControllers(fs.predictedDisplayTime);
 
     XrCompositionLayerProjectionView projViews[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW }, { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
     XrCompositionLayerProjection layer{ XR_TYPE_COMPOSITION_LAYER_PROJECTION };
     const XrCompositionLayerBaseHeader* layers[1] = { (XrCompositionLayerBaseHeader*)&layer };
     uint32_t layerCount = 0;
 
+    XrCompositionLayerQuad screenLayer{ XR_TYPE_COMPOSITION_LAYER_QUAD };
     float xs, ys;
-    if (fs.shouldRender && StereoProjection(xs, ys))
+    // Full VR while the game shows a 3D camera; otherwise (title, menu, intro
+    // video) show its image on a floating virtual screen.
+    if (fs.shouldRender && StereoProjectionFresh() && StereoProjection(xs, ys))
     {
         ID3D11Texture2D* bb = nullptr;
         swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb);
@@ -742,6 +856,11 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
                     g_eyeFov[0].angleUp * 57.2958f, g_eyeFov[0].angleDown * 57.2958f,
                     xs, ys, renderedEye, fs.predictedDisplayPeriod / 1e6);
         }
+    }
+    else if (fs.shouldRender && SubmitScreen(swapChain, fs, screenLayer))
+    {
+        layers[0] = (XrCompositionLayerBaseHeader*)&screenLayer;
+        layerCount = 1;
     }
     XrFrameEndInfo fei{ XR_TYPE_FRAME_END_INFO };
     fei.displayTime = fs.predictedDisplayTime;

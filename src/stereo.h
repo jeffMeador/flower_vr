@@ -47,6 +47,10 @@ int StereoCurrentEye();
 // Feed a recovered mono ViewProj (from any draw exposing both model and MVP).
 void StereoObserveViewProj(const Mat4& viewProj);
 
+// True if a 3D game camera was seen in the last few frames (false in menus,
+// title screens and videos).
+bool StereoProjectionFresh();
+
 // Projection scales of the game camera (P[0][0], P[1][1]); false until seen.
 bool StereoProjection(float& xs, float& ys);
 

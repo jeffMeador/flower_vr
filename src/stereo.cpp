@@ -11,6 +11,7 @@ static wchar_t g_iniPath[MAX_PATH] = {};
 
 // Game projection, recovered from the camera's ViewProj.
 static bool  g_projKnown = false;
+static uint64_t g_projFrame = 0; // frame the camera was last observed
 static float g_xs = 0, g_ys = 0, g_A = 0, g_B = 0;
 static float g_right[3] = {}, g_up[3] = {}, g_fwd[3] = {}; // canonical axes in world space
 
@@ -166,6 +167,13 @@ void StereoObserveViewProj(const Mat4& vp)
         Log("[stereo] proj from VP: xs=%.4f ys=%.4f |wrow|=%.4f A=%.5f B=%.5f right=(%.3f %.3f %.3f) up=(%.3f %.3f %.3f)",
             c0, c1, c3, A, B, g_right[0], g_right[1], g_right[2], g_up[0], g_up[1], g_up[2]);
     g_projKnown = true;
+    g_projFrame = g_frame;
+}
+
+bool StereoProjectionFresh()
+{
+    // A 3D camera was seen in the last few frames (false in menus/videos).
+    return g_projKnown && g_frame - g_projFrame < 10;
 }
 
 bool StereoProjection(float& xs, float& ys)
@@ -267,7 +275,8 @@ static const DisplayFov* CurrentDisplay()
 
 uint64_t StereoPatchKey()
 {
-    if (!g_projKnown) return 0;
+    // Only while a 3D camera is live: menus/videos after a level must not be remapped with a stale camera.
+    if (!g_projKnown || g_frame - g_projFrame >= 10) return 0;
     if (!(StereoCurrentEye() != 0 || g_cfg.doubleRender || CurrentDisplay() || g_activePoses[g_renderEye].set)) return 0;
     return (g_key << 1) | (uint64_t)g_renderEye; // distinct per eye
 }
