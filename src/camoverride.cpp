@@ -1,5 +1,6 @@
 #include "camoverride.h"
 #include "log.h"
+#include "keys.h"
 #include "stereo.h"
 #include <Windows.h>
 #include <cstring>
@@ -237,7 +238,7 @@ bool CamOverrideInstall(float fovDegrees)
 void CamOverrideTick(bool enable)
 {
     if (!g_installed) return;
-    if (GetAsyncKeyState(VK_F3) & 1)
+    if (KeyEdge(VK_F3))
     {
         g_headCamera = !g_headCamera;
         Log("[camoverride] F3: head camera = %d", g_headCamera);

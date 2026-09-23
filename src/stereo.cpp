@@ -1,5 +1,6 @@
 #include "stereo.h"
 #include "log.h"
+#include "keys.h"
 #include <cstdlib>
 
 static StereoConfig g_cfg;
@@ -41,13 +42,28 @@ void StereoLoadConfig(const wchar_t* dllDir)
     g_cfg.separation = ReadIniFloat(L"separation", g_cfg.separation);
     g_cfg.worldScale = ReadIniFloat(L"worldScale", g_cfg.worldScale);
     g_cfg.shiftEyePosition = ReadIniFloat(L"shiftEyePosition", 0.0f) != 0.0f;
-    Log("[stereo] config: enabled=%d separation=%.4f worldScale=%.3f shiftEyePosition=%d",
-        g_cfg.enabled, g_cfg.separation, g_cfg.worldScale, g_cfg.shiftEyePosition);
+    wchar_t lens[32];
+    GetPrivateProfileStringW(L"stereo", L"lens", L"game", lens, 32, g_iniPath);
+    g_cfg.lensMode = _wcsicmp(lens, L"fixed") == 0 ? 1 : _wcsicmp(lens, L"off") == 0 ? 2 : 0;
+    Log("[stereo] config: enabled=%d separation=%.4f worldScale=%.3f shiftEyePosition=%d lens=%d",
+        g_cfg.enabled, g_cfg.separation, g_cfg.worldScale, g_cfg.shiftEyePosition, g_cfg.lensMode);
+}
+
+static void SaveIni(const wchar_t* key, const wchar_t* value)
+{
+    WritePrivateProfileStringW(L"stereo", key, value, g_iniPath);
+}
+
+static void SaveScale()
+{
+    wchar_t v[32];
+    swprintf_s(v, L"%.4f", g_cfg.worldScale); SaveIni(L"worldScale", v);
+    swprintf_s(v, L"%.4f", g_cfg.separation); SaveIni(L"separation", v);
 }
 
 static bool KeyPressed(int vk)
 {
-    return (GetAsyncKeyState(vk) & 1) != 0; // "pressed since last query"
+    return KeyEdge(vk);
 }
 
 static int EyeIndex()
@@ -72,12 +88,22 @@ void StereoFrameBoundary()
         g_cfg.separation /= 1.25f;
         g_cfg.worldScale /= 1.25f;
         Log("[stereo] F10: separation=%.4f worldScale=%.3f", g_cfg.separation, g_cfg.worldScale);
+        SaveScale();
     }
     if (KeyPressed(VK_F11))
     {
         g_cfg.separation *= 1.25f;
         g_cfg.worldScale *= 1.25f;
         Log("[stereo] F11: separation=%.4f worldScale=%.3f", g_cfg.separation, g_cfg.worldScale);
+        SaveScale();
+    }
+    if (KeyPressed(VK_F2))
+    {
+        static const wchar_t* names[3] = { L"game", L"fixed", L"off" };
+        g_cfg.lensMode = (g_cfg.lensMode + 1) % 3;
+        g_cfg.lensLockPending = g_cfg.lensMode == 1;
+        SaveIni(L"lens", names[g_cfg.lensMode]);
+        Log("[stereo] F2: lens mode %ls", names[g_cfg.lensMode]);
     }
     if (KeyPressed(VK_F8))
     {

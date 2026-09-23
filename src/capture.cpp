@@ -371,13 +371,29 @@ static void PrepareDraw(ID3D11DeviceContext* self)
                 break;
             case PatchKind::LensFov:
             {
-                // fov -> 0 with R = maxRadius / tan(fov/2) turns the fisheye
-                // mapping uv = 0.5 + xy * R*tan(r/maxR * fov/2)/r into the identity.
+                // Fisheye mapping uv = 0.5 + xy * R*tan(r/maxR * fov/2)/r.
+                //  game:  leave it (magnified at rest, shrinks as fov grows with speed)
+                //  fixed: lock fov at its value when "fixed" was selected (F2)
+                //  off:   fov -> 0 with R = maxR/tan(fov/2) is the identity
                 if (off.lensROffset + 4 > patched.size() || off.lensMaxROffset + 4 > patched.size()) break;
-                const float tiny = 1e-4f;
+                static float lockedFov = 0.0f;
+                static DWORD lastLog = 0;
+                if (GetTickCount() - lastLog > 3000)
+                {
+                    lastLog = GetTickCount();
+                    Log("[capture] lens: game fov %.1f deg (mode %d, locked %.1f)", f[0] * 57.2958f, Stereo().lensMode, lockedFov * 57.2958f);
+                }
+                if (Stereo().lensMode == 1 && (Stereo().lensLockPending || lockedFov == 0.0f) && f[0] > 0.01f)
+                {
+                    lockedFov = f[0];
+                    Stereo().lensLockPending = false;
+                    Log("[capture] lens: locked at %.1f deg", lockedFov * 57.2958f);
+                }                int mode = Stereo().lensMode;
+                if (mode == 0) break;
+                float useFov = (mode == 1 && lockedFov > 0.0f) ? lockedFov : 1e-4f;
                 float maxR = *reinterpret_cast<const float*>(patched.data() + off.lensMaxROffset);
-                f[0] = tiny;
-                *reinterpret_cast<float*>(patched.data() + off.lensROffset) = maxR / tanf(tiny * 0.5f);
+                f[0] = useFov;
+                *reinterpret_cast<float*>(patched.data() + off.lensROffset) = maxR / tanf(useFov * 0.5f);
                 any = true;
                 break;
             }

@@ -1,5 +1,6 @@
 #include "hooks.h"
 #include "log.h"
+#include "keys.h"
 #include "capture.h"
 #include "fakepad.h"
 #include "stereo.h"
@@ -141,7 +142,7 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
     // F12 dumps the next two frames: consecutive frames hold both eyes under
     // alternate-eye stereo. (Periodic dumps at 7680x2160 cost ~50MB each.)
     static int dumpRemaining = 0;
-    if (GetAsyncKeyState(VK_F12) & 1)
+    if (KeyEdge(VK_F12))
         dumpRemaining = 2;
     if (frame < 2 || dumpRemaining > 0)
     {
