@@ -15,7 +15,7 @@
 #include <string>
 
 // What to do with one cbuffer variable when rendering a given eye.
-enum class PatchKind { Clip, View, EyePos };
+enum class PatchKind { Clip, View, EyePos, LensFov };
 
 struct PatchVar
 {
@@ -28,6 +28,10 @@ struct ShaderOffsets
     bool hasModel = false;   UINT modelOffset = 0;
     bool hasMVP = false;     UINT mvpOffset = 0;
     std::vector<PatchVar> patches;
+    // LensDistortion_vs: fisheye re-projection of the finished frame by "fov";
+    // neutralized in VR (it warps the headset image, worse at speed).
+    bool hasLensR = false; UINT lensROffset = 0;
+    bool hasLensMaxR = false; UINT lensMaxROffset = 0;
     UINT cbSize = 0;
     int  id = 0;
 };
@@ -151,6 +155,10 @@ static void ReflectAndCacheOffsets(ID3D11VertexShader* shader, const void* bytec
                 offsets.patches.push_back({ PatchKind::Clip, varDesc.StartOffset });
             else if (n == "modelview")
                 offsets.patches.push_back({ PatchKind::View, varDesc.StartOffset });
+            else if (n == "fov")
+                offsets.patches.push_back({ PatchKind::LensFov, varDesc.StartOffset });
+            else if (n == "r") { offsets.hasLensR = true; offsets.lensROffset = varDesc.StartOffset; }
+            else if (n == "maxradius") { offsets.hasLensMaxR = true; offsets.lensMaxROffset = varDesc.StartOffset; }
             else if (n == "eyepositionws")
                 offsets.patches.push_back({ PatchKind::EyePos, varDesc.StartOffset });
             else if (n == "model")
@@ -338,7 +346,7 @@ static void PrepareDraw(ID3D11DeviceContext* self)
     {
         for (const PatchVar& p : off.patches)
         {
-            if (p.offset + (p.kind == PatchKind::EyePos ? 12u : 64u) > patched.size()) continue;
+            if (p.offset + (p.kind == PatchKind::EyePos ? 12u : p.kind == PatchKind::LensFov ? 4u : 64u) > patched.size()) continue;
             float* f = reinterpret_cast<float*>(patched.data() + p.offset);
             switch (p.kind)
             {
