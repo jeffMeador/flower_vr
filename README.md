@@ -4,6 +4,39 @@ Goal: add real stereoscopic, head-tracked VR to the 2020 PC/Steam build of
 Flower by hooking its DirectX 11 layer from outside the engine (no PhyreEngine
 source available or needed). See git log for phase-by-phase history.
 
+## Current state (Phase 4) — playable in VR
+
+Stereo, head-tracked, 90 fps per eye on SteamVR/OpenXR (tested on an RTX 5090,
+wireless headset via Steam Link).
+
+**Install:** run `build.bat` (deploys `d3d11.dll` + `d3d11_orig.dll` into the
+GOG game folder), copy `vrmod.ini.example` → `<game>\vrmod.ini` and
+`vrmod_Flower.cfg.example` → `<game>\vrmod_Flower.cfg`, start SteamVR, run
+Flower.exe.
+
+**How it works, end to end:**
+- Every render-target/depth texture has a right-eye twin; each draw runs once
+  per eye with per-eye matrices (`shadow.cpp`, `capture.cpp`, `stereo.cpp`).
+- The game renders a square 2160×2160 frame in VR: `Documents\Flower\Flower.cfg`
+  is redirected to `vrmod_Flower.cfg` (user's file untouched) and square
+  display modes are advertised so the game accepts them (`fileredirect.cpp`,
+  `displaymodes.cpp`). 4x MSAA.
+- The engine camera is turned by the head (culling/grass follow gaze) while the
+  steering code keeps the flight camera (`camoverride.cpp`); FOV forced to 125°.
+- Each eye image is submitted to OpenXR with the exact pose it was rendered
+  with (`xr.cpp`).
+
+**Settings (`vrmod.ini`) / hotkeys:**
+
+| Setting | Key | Notes |
+|---|---|---|
+| `worldScale` (0.3) | F10 bigger world / F11 smaller | 0.3 won a blind A/B vs 1.0. Clamped 0.1–10. |
+| `lens` (off) | F2 game → fixed → off | Game's fisheye post pass; in VR it shrank the world at speed. |
+| `cameraBack`/`cameraUp` | `[` `]` / `,` `.` | VR viewpoint offset from the game camera, game units. |
+| `headCamera` (1) | F3 | Turn the engine camera with the head. |
+| `render` (double) | — | `alternate` = old alternate-eye mode. |
+| — | F6 | Recenter. |
+| — | F12 | Dump both eyes of one frame (`frame_N.bmp`, `frame_N_R.bmp`). |
 ## Confirmed facts
 
 - Renderer: DirectX 11 (`d3d11.dll` + `dxgi.dll` + `D3DCOMPILER_47.dll`), x64,
@@ -205,14 +238,11 @@ wider. Camera layout: fov +0x134, near +0x138, far +0x13C, aspect +0x140.
 
 ## Next steps
 
-1. **Head tracking**: rotate/translate the game view by the HMD pose
-   (apply `inverse(headPose)` in view space in `StereoPatchClip`, switch the
-   layer to LOCAL space) so the world stays put when you turn your head.
-2. Replace AER with true per-eye rendering (double draw calls) for full
-   frame rate per eye, or at least reprojection-friendly timing.
-3. Render only the square we use (resolution/aspect) to stop wasting 2/3 of
-   the pixels; tune world scale (`separation`) in-headset.
-4. Motion controllers → virtual pad (fakepad.cpp hook).
+1. Motion controllers → virtual pad (`fakepad.cpp` hook): steer with a hand.
+2. Headset-only polish: disable/adjust motion blur and depth of field in VR if
+   they bother; HUD/menus as a floating quad instead of painted into the eyes.
+3. Performance headroom: try 2644×2644 (headset's recommended) or 8x MSAA.
+4. Steam build (same exe? verify patch bytes) and other levels.
 ## Tools in this repo
 
 - `build.bat` — builds the proxy `d3d11.dll` mod itself, deploys it + a
