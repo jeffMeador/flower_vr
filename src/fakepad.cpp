@@ -6,9 +6,10 @@
 #include <cstring>
 #include <cmath>
 
-// Virtual XInput controller #0 driven by a text file, so the game can be
-// steered by scripts (the game's raw-input path ignores injected
-// SendInput events). Later this is where VR controller input plugs in.
+// Virtual XInput controller #0, merged with any real pad #0. Two sources:
+//  - VR motion controllers (FakePadSetXR, from xr.cpp)
+//  - a text file, so scripts can drive the game (the game's raw-input path
+//    ignores injected SendInput events)
 //
 // vrmod_pad.txt, one line:  <lx> <ly> [A] [B] [X] [Y] [START] [BACK] [LT] [RT]
 // lx/ly in -1..1. Missing file = neutral pad. The pad only appears when
@@ -24,6 +25,19 @@ static float g_lx = 0, g_ly = 0;
 static WORD g_buttons = 0;
 static BYTE g_lt = 0, g_rt = 0;
 static DWORD g_packet = 0;
+static bool g_fileEnabled = false;
+
+// Second source: VR motion controllers (set every frame by the XR code).
+static volatile float g_xrLx = 0, g_xrLy = 0;
+static volatile WORD g_xrButtons = 0;
+static volatile BYTE g_xrLt = 0, g_xrRt = 0;
+static volatile DWORD g_xrPacket = 0;
+
+void FakePadSetXR(float lx, float ly, WORD buttons, BYTE lt, BYTE rt)
+{
+    if (lx != g_xrLx || ly != g_xrLy || buttons != g_xrButtons || lt != g_xrLt || rt != g_xrRt) g_xrPacket++;
+    g_xrLx = lx; g_xrLy = ly; g_xrButtons = buttons; g_xrLt = lt; g_xrRt = rt;
+}
 
 static void ReloadPadFile()
 {
@@ -78,15 +92,17 @@ static DWORD WINAPI Hook_XInputGetState(DWORD user, XINPUT_STATE* state)
     DWORD r = g_realXInputGetState(user, state);
     if (user != 0 || !state) return r;
 
-    ReloadPadFile();
+    if (g_fileEnabled) ReloadPadFile();
     if (r != ERROR_SUCCESS)
         memset(state, 0, sizeof(*state));
-    state->dwPacketNumber += g_packet;
-    state->Gamepad.wButtons |= g_buttons;
-    if (g_lt) state->Gamepad.bLeftTrigger = g_lt;
-    if (g_rt) state->Gamepad.bRightTrigger = g_rt;
-    if (g_lx != 0) state->Gamepad.sThumbLX = ToAxis(g_lx);
-    if (g_ly != 0) state->Gamepad.sThumbLY = ToAxis(g_ly);
+    state->dwPacketNumber += g_packet + g_xrPacket;
+    state->Gamepad.wButtons |= g_buttons | g_xrButtons;
+    BYTE lt = g_lt > g_xrLt ? g_lt : g_xrLt, rt = g_rt > g_xrRt ? g_rt : g_xrRt;
+    if (lt > state->Gamepad.bLeftTrigger) state->Gamepad.bLeftTrigger = lt;
+    if (rt > state->Gamepad.bRightTrigger) state->Gamepad.bRightTrigger = rt;
+    float lx = g_lx != 0 ? g_lx : g_xrLx, ly = g_ly != 0 ? g_ly : g_xrLy;
+    if (lx != 0) state->Gamepad.sThumbLX = ToAxis(lx);
+    if (ly != 0) state->Gamepad.sThumbLY = ToAxis(ly);
     return ERROR_SUCCESS;
 }
 
@@ -94,8 +110,9 @@ void InstallFakePad(const wchar_t* dllDir)
 {
     wchar_t ini[MAX_PATH];
     swprintf_s(ini, L"%s\\vrmod.ini", dllDir);
-    if (!GetPrivateProfileIntW(L"debug", L"fakepad", 0, ini))
-        return;
+    // Always hooked (VR controllers feed it); the script-driven file source
+    // only with [debug] fakepad=1.
+    g_fileEnabled = GetPrivateProfileIntW(L"debug", L"fakepad", 0, ini) != 0;
     swprintf_s(g_padPath, L"%s\\vrmod_pad.txt", dllDir);
 
     HMODULE xi = GetModuleHandleW(L"XINPUT9_1_0.dll");

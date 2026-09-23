@@ -7,6 +7,9 @@
 #include <cmath>
 #include <cstdio>
 #include <vector>
+#include <initializer_list>
+#include <Xinput.h>
+#include "fakepad.h"
 
 #define XR_USE_PLATFORM_WIN32
 #define XR_USE_GRAPHICS_API_D3D11
@@ -23,7 +26,10 @@ static PFN_xrGetInstanceProcAddr xrGetInstanceProcAddr_ = nullptr;
     X(xrPollEvent) X(xrBeginSession) X(xrEndSession) X(xrWaitFrame) X(xrBeginFrame) \
     X(xrEndFrame) X(xrLocateViews) X(xrAcquireSwapchainImage) X(xrWaitSwapchainImage) \
     X(xrReleaseSwapchainImage) X(xrEnumerateViewConfigurationViews) X(xrResultToString) \
-    X(xrGetD3D11GraphicsRequirementsKHR) X(xrLocateSpace)
+    X(xrGetD3D11GraphicsRequirementsKHR) X(xrLocateSpace) \
+    X(xrStringToPath) X(xrCreateActionSet) X(xrCreateAction) X(xrSuggestInteractionProfileBindings) \
+    X(xrAttachSessionActionSets) X(xrSyncActions) X(xrGetActionStateFloat) X(xrGetActionStateVector2f) \
+    X(xrGetActionStateBoolean) X(xrCreateActionSpace)
 
 #define DECLARE(name) static PFN_##name name##_ = nullptr;
 XR_FUNCS(DECLARE)
@@ -165,6 +171,8 @@ static DXGI_FORMAT SrgbOf(DXGI_FORMAT f)
     }
 }
 
+static bool CreateInput(); // motion controllers, below
+
 static bool CreateSession(IDXGISwapChain* gameSwapChain)
 {
     XrGraphicsRequirementsD3D11KHR req{ XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR };
@@ -259,6 +267,7 @@ static bool CreateSession(IDXGISwapChain* gameSwapChain)
         g_device->CreateTexture2D(&rd, nullptr, &g_resolveRight);
     }
 
+    if (!CreateInput()) Log("[xr] controller input unavailable (continuing without it)");
     Log("[xr] session created, waiting for READY");
     return true;
 }
@@ -328,6 +337,195 @@ static void CopyToEye(int e, ID3D11DeviceContext* ctx, ID3D11Texture2D* src, con
     XrSwapchainImageReleaseInfo ri{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
     xrReleaseSwapchainImage_(sc.handle, &ri);
     sc.everReleased = true;
+}
+
+// ---- motion controllers -> virtual gamepad ----
+// Thumbstick = left stick, trigger = propel (A + right trigger), A/X = A,
+// B/Y = B, menu = Start. Holding grip and pointing steers like Flower's
+// original tilt control: the aim direction relative to where the grip started,
+// 30 degrees = full stick.
+static XrActionSet g_actionSet = XR_NULL_HANDLE;
+static XrAction g_actSteer, g_actPropel, g_actA, g_actB, g_actMenu, g_actGrip, g_actAim;
+static XrPath g_hand[2] = {};
+static XrSpace g_aimSpace[2] = {};
+static bool g_inputReady = false;
+
+static XrPath ToPath(const char* s)
+{
+    XrPath p = XR_NULL_PATH;
+    xrStringToPath_(g_instance, s, &p);
+    return p;
+}
+
+static XrAction MakeAction(const char* name, const char* label, XrActionType type)
+{
+    XrActionCreateInfo ci{ XR_TYPE_ACTION_CREATE_INFO };
+    strcpy_s(ci.actionName, name);
+    strcpy_s(ci.localizedActionName, label);
+    ci.actionType = type;
+    ci.countSubactionPaths = 2;
+    ci.subactionPaths = g_hand;
+    XrAction a = XR_NULL_HANDLE;
+    XrResult r = xrCreateAction_(g_actionSet, &ci, &a);
+    if (XR_FAILED(r)) Log("[xr] xrCreateAction %s: %s", name, ResultStr(r));
+    return a;
+}
+
+struct SuggestedBinding { XrAction* action; const char* path; };
+
+static void Suggest(const char* profile, std::initializer_list<SuggestedBinding> list)
+{
+    std::vector<XrActionSuggestedBinding> b;
+    for (const SuggestedBinding& s : list)
+        b.push_back({ *s.action, ToPath(s.path) });
+    XrInteractionProfileSuggestedBinding sb{ XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING };
+    sb.interactionProfile = ToPath(profile);
+    sb.suggestedBindings = b.data();
+    sb.countSuggestedBindings = (uint32_t)b.size();
+    XrResult r = xrSuggestInteractionProfileBindings_(g_instance, &sb);
+    Log("[xr] bindings for %s: %s", profile, ResultStr(r));
+}
+
+static bool CreateInput()
+{
+    g_hand[0] = ToPath("/user/hand/left");
+    g_hand[1] = ToPath("/user/hand/right");
+
+    XrActionSetCreateInfo asci{ XR_TYPE_ACTION_SET_CREATE_INFO };
+    strcpy_s(asci.actionSetName, "flower");
+    strcpy_s(asci.localizedActionSetName, "Flower");
+    XR_CHECK(xrCreateActionSet_(g_instance, &asci, &g_actionSet));
+
+    g_actSteer = MakeAction("steer", "Steer", XR_ACTION_TYPE_VECTOR2F_INPUT);
+    g_actPropel = MakeAction("propel", "Propel / select", XR_ACTION_TYPE_FLOAT_INPUT);
+    g_actA = MakeAction("button_a", "Button A", XR_ACTION_TYPE_BOOLEAN_INPUT);
+    g_actB = MakeAction("button_b", "Button B", XR_ACTION_TYPE_BOOLEAN_INPUT);
+    g_actMenu = MakeAction("menu", "Pause", XR_ACTION_TYPE_BOOLEAN_INPUT);
+    g_actGrip = MakeAction("tilt_steer", "Hold to steer by pointing", XR_ACTION_TYPE_FLOAT_INPUT);
+    g_actAim = MakeAction("aim", "Hand aim", XR_ACTION_TYPE_POSE_INPUT);
+
+    Suggest("/interaction_profiles/oculus/touch_controller", {
+        { &g_actSteer, "/user/hand/left/input/thumbstick" }, { &g_actSteer, "/user/hand/right/input/thumbstick" },
+        { &g_actPropel, "/user/hand/left/input/trigger/value" }, { &g_actPropel, "/user/hand/right/input/trigger/value" },
+        { &g_actGrip, "/user/hand/left/input/squeeze/value" }, { &g_actGrip, "/user/hand/right/input/squeeze/value" },
+        { &g_actA, "/user/hand/right/input/a/click" }, { &g_actA, "/user/hand/left/input/x/click" },
+        { &g_actB, "/user/hand/right/input/b/click" }, { &g_actB, "/user/hand/left/input/y/click" },
+        { &g_actMenu, "/user/hand/left/input/menu/click" },
+        { &g_actAim, "/user/hand/left/input/aim/pose" }, { &g_actAim, "/user/hand/right/input/aim/pose" } });
+    Suggest("/interaction_profiles/valve/index_controller", {
+        { &g_actSteer, "/user/hand/left/input/thumbstick" }, { &g_actSteer, "/user/hand/right/input/thumbstick" },
+        { &g_actPropel, "/user/hand/left/input/trigger/value" }, { &g_actPropel, "/user/hand/right/input/trigger/value" },
+        { &g_actGrip, "/user/hand/left/input/squeeze/value" }, { &g_actGrip, "/user/hand/right/input/squeeze/value" },
+        { &g_actA, "/user/hand/left/input/a/click" }, { &g_actA, "/user/hand/right/input/a/click" },
+        { &g_actB, "/user/hand/right/input/b/click" }, { &g_actMenu, "/user/hand/left/input/b/click" },
+        { &g_actAim, "/user/hand/left/input/aim/pose" }, { &g_actAim, "/user/hand/right/input/aim/pose" } });
+    Suggest("/interaction_profiles/htc/vive_controller", {
+        { &g_actSteer, "/user/hand/left/input/trackpad" }, { &g_actSteer, "/user/hand/right/input/trackpad" },
+        { &g_actPropel, "/user/hand/left/input/trigger/value" }, { &g_actPropel, "/user/hand/right/input/trigger/value" },
+        { &g_actGrip, "/user/hand/left/input/squeeze/click" }, { &g_actGrip, "/user/hand/right/input/squeeze/click" },
+        { &g_actMenu, "/user/hand/left/input/menu/click" }, { &g_actMenu, "/user/hand/right/input/menu/click" },
+        { &g_actAim, "/user/hand/left/input/aim/pose" }, { &g_actAim, "/user/hand/right/input/aim/pose" } });
+    Suggest("/interaction_profiles/microsoft/motion_controller", {
+        { &g_actSteer, "/user/hand/left/input/thumbstick" }, { &g_actSteer, "/user/hand/right/input/thumbstick" },
+        { &g_actPropel, "/user/hand/left/input/trigger/value" }, { &g_actPropel, "/user/hand/right/input/trigger/value" },
+        { &g_actGrip, "/user/hand/left/input/squeeze/click" }, { &g_actGrip, "/user/hand/right/input/squeeze/click" },
+        { &g_actMenu, "/user/hand/left/input/menu/click" }, { &g_actMenu, "/user/hand/right/input/menu/click" },
+        { &g_actAim, "/user/hand/left/input/aim/pose" }, { &g_actAim, "/user/hand/right/input/aim/pose" } });
+    Suggest("/interaction_profiles/khr/simple_controller", {
+        { &g_actPropel, "/user/hand/left/input/select/click" }, { &g_actPropel, "/user/hand/right/input/select/click" },
+        { &g_actMenu, "/user/hand/left/input/menu/click" }, { &g_actMenu, "/user/hand/right/input/menu/click" },
+        { &g_actAim, "/user/hand/left/input/aim/pose" }, { &g_actAim, "/user/hand/right/input/aim/pose" } });
+
+    for (int h = 0; h < 2; ++h)
+    {
+        XrActionSpaceCreateInfo sci{ XR_TYPE_ACTION_SPACE_CREATE_INFO };
+        sci.action = g_actAim;
+        sci.subactionPath = g_hand[h];
+        sci.poseInActionSpace.orientation.w = 1.0f;
+        XR_CHECK(xrCreateActionSpace_(g_session, &sci, &g_aimSpace[h]));
+    }
+
+    XrSessionActionSetsAttachInfo ai{ XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO };
+    ai.countActionSets = 1;
+    ai.actionSets = &g_actionSet;
+    XR_CHECK(xrAttachSessionActionSets_(g_session, &ai));
+    g_inputReady = true;
+    Log("[xr] controller input ready");
+    return true;
+}
+
+static float GetFloat(XrAction a, int h)
+{
+    XrActionStateGetInfo gi{ XR_TYPE_ACTION_STATE_GET_INFO };
+    gi.action = a; gi.subactionPath = g_hand[h];
+    XrActionStateFloat st{ XR_TYPE_ACTION_STATE_FLOAT };
+    return XR_SUCCEEDED(xrGetActionStateFloat_(g_session, &gi, &st)) && st.isActive ? st.currentState : 0.0f;
+}
+static bool GetBool(XrAction a, int h)
+{
+    XrActionStateGetInfo gi{ XR_TYPE_ACTION_STATE_GET_INFO };
+    gi.action = a; gi.subactionPath = g_hand[h];
+    XrActionStateBoolean st{ XR_TYPE_ACTION_STATE_BOOLEAN };
+    return XR_SUCCEEDED(xrGetActionStateBoolean_(g_session, &gi, &st)) && st.isActive && st.currentState;
+}
+static XrVector2f GetVec2(XrAction a, int h)
+{
+    XrActionStateGetInfo gi{ XR_TYPE_ACTION_STATE_GET_INFO };
+    gi.action = a; gi.subactionPath = g_hand[h];
+    XrActionStateVector2f st{ XR_TYPE_ACTION_STATE_VECTOR2F };
+    if (XR_SUCCEEDED(xrGetActionStateVector2f_(g_session, &gi, &st)) && st.isActive) return st.currentState;
+    return { 0, 0 };
+}
+
+static XrQuaternionf QMul(const XrQuaternionf& a, const XrQuaternionf& b);
+static XrQuaternionf QConj(const XrQuaternionf& q);
+static XrVector3f QRot(const XrQuaternionf& q, const XrVector3f& v);
+
+static void PollControllers(XrTime time)
+{
+    if (!g_inputReady || g_state != XR_SESSION_STATE_FOCUSED) { FakePadSetXR(0, 0, 0, 0, 0); return; }
+    XrActiveActionSet active{ g_actionSet, XR_NULL_PATH };
+    XrActionsSyncInfo si{ XR_TYPE_ACTIONS_SYNC_INFO };
+    si.countActiveActionSets = 1;
+    si.activeActionSets = &active;
+    if (XR_FAILED(xrSyncActions_(g_session, &si))) return;
+
+    float lx = 0, ly = 0, trigger = 0;
+    bool a = false, b = false, menu = false;
+    static bool gripping[2] = {};
+    static XrQuaternionf rest[2];
+    for (int h = 0; h < 2; ++h)
+    {
+        XrVector2f s = GetVec2(g_actSteer, h);
+        if (s.x * s.x + s.y * s.y > lx * lx + ly * ly) { lx = s.x; ly = s.y; }
+        float t = GetFloat(g_actPropel, h);
+        if (t > trigger) trigger = t;
+        a |= GetBool(g_actA, h);
+        b |= GetBool(g_actB, h);
+        menu |= GetBool(g_actMenu, h);
+
+        // Grip + point steering.
+        bool grip = GetFloat(g_actGrip, h) > 0.6f;
+        XrSpaceLocation loc{ XR_TYPE_SPACE_LOCATION };
+        bool tracked = XR_SUCCEEDED(xrLocateSpace_(g_aimSpace[h], g_localSpace, time, &loc)) &&
+            (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
+        if (grip && tracked)
+        {
+            if (!gripping[h]) { rest[h] = loc.pose.orientation; gripping[h] = true; }
+            XrVector3f f = QRot(QMul(QConj(rest[h]), loc.pose.orientation), { 0, 0, -1 });
+            float tx = f.x / 0.5f, ty = f.y / 0.5f; // sin(30 deg) = full deflection
+            if (tx > 1) tx = 1; if (tx < -1) tx = -1;
+            if (ty > 1) ty = 1; if (ty < -1) ty = -1;
+            if (tx * tx + ty * ty > lx * lx + ly * ly) { lx = tx; ly = ty; }
+        }
+        else gripping[h] = false;
+    }
+
+    WORD buttons = 0;
+    if (a || trigger > 0.5f) buttons |= XINPUT_GAMEPAD_A;
+    if (b) buttons |= XINPUT_GAMEPAD_B;
+    if (menu) buttons |= XINPUT_GAMEPAD_START;
+    FakePadSetXR(lx, ly, buttons, 0, (BYTE)(trigger * 255.0f));
 }
 
 // ---- small quaternion helpers (x, y, z, w) ----
