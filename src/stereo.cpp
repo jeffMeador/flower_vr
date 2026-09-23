@@ -131,6 +131,18 @@ void StereoFrameBoundary()
         SaveIni(L"lens", names[g_cfg.lensMode]);
         Log("[stereo] F2: lens mode %ls", names[g_cfg.lensMode]);
     }
+    if (KeyPressed(VK_F1))
+    {
+        g_cfg.depthOfField = !g_cfg.depthOfField;
+        SaveIni(L"depthOfField", g_cfg.depthOfField ? L"1" : L"0");
+        Log("[stereo] F1: depth of field %s", g_cfg.depthOfField ? "on" : "off");
+    }
+    if (KeyPressed(VK_F5))
+    {
+        g_cfg.motionBlur = !g_cfg.motionBlur;
+        SaveIni(L"motionBlur", g_cfg.motionBlur ? L"1" : L"0");
+        Log("[stereo] F5: motion blur %s", g_cfg.motionBlur ? "on" : "off");
+    }
     if (KeyPressed(VK_F8))
     {
         g_cfg.shiftEyePosition = !g_cfg.shiftEyePosition;

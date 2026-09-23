@@ -545,11 +545,21 @@ static void PollControllers(XrTime time)
     }
 
     // Motion steering: the right hand (left if the right isn't tracked).
+    // Only in a 3D level: the menu expects no stick input to settle on a pot.
+    // "Straight" is re-captured whenever a level starts (and on thumbstick
+    // click), from however the controller is held at that moment - capturing
+    // it once at startup pinned the stick at full-up if the controller was
+    // lying down then. The thumbstick overrides whenever it's pushed.
     static bool neutralSet[2] = {};
     static XrQuaternionf neutral[2];
+    static bool wasInLevel = false;
+    bool inLevel = StereoProjectionFresh();
+    if (inLevel && !wasInLevel) { neutralSet[0] = neutralSet[1] = false; }
+    wasInLevel = inLevel;
+
     float lx = stickX, ly = stickY;
     int h = aimOk[1] ? 1 : aimOk[0] ? 0 : -1;
-    if (h >= 0)
+    if (h >= 0 && inLevel)
     {
         if (recenter || !neutralSet[h])
         {
@@ -557,12 +567,13 @@ static void PollControllers(XrTime time)
             neutralSet[h] = true;
             Log("[xr] motion steering re-centered on %s hand", h ? "right" : "left");
         }
-        if (g_motionSteering)
+        bool stickPushed = stickX * stickX + stickY * stickY > 0.25f * 0.25f;
+        if (g_motionSteering && !stickPushed)
         {
             XrVector3f f = QRot(QMul(QConj(neutral[h]), aim[h].orientation), { 0, 0, -1 });
             float mx = f.x / 0.5f, my = f.y / 0.5f; // sin(30 deg) = full deflection
             Clamp1(mx); Clamp1(my);
-            if (mx * mx + my * my > lx * lx + ly * ly) { lx = mx; ly = my; }
+            lx = mx; ly = my;
         }
     }
 
@@ -830,11 +841,6 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
             float ws = Stereo().worldScale;
             float camToMeters = 1.0f / (ws > 1e-4f ? ws : 1e-4f);
             XrQuaternionf refInv = QConj(g_ref.orientation);
-            // Debug (F5): pretend the head is turned 30 deg to the right, to verify
-            // rotation direction without wearing the headset.
-            static bool fakeTurn = false;
-            if (KeyEdge(VK_F5)) { fakeTurn = !fakeTurn; Log("[xr] F5: fake 30 deg right turn = %d", fakeTurn); }
-            if (fakeTurn) refInv = QMul({ 0, sinf(-0.2618f), 0, cosf(-0.2618f) }, refInv);
             for (int e = 0; e < 2; ++e)
             {
                 StereoSetDisplayFov(e, tanf(views[e].fov.angleLeft), tanf(views[e].fov.angleRight),
