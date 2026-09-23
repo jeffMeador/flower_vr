@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Root>
+  <Settings Version="38">
+    <Controls MouseInvert="false" MouseSensitivity="5" PadInvert="false" Rumble="true">
+      <Sensor>
+        <KernelFunctions>
+          <Linear ExpBegin="0.0" ExpEnd="0.0"/>
+          <Centre ExpBegin="1.0" ExpEnd="1.0"/>
+          <Early ExpBegin="0.4" ExpEnd="5.0"/>
+        </KernelFunctions>
+        <Mouse KernelDuration="1.200000" KernelFunction="Default" Power="1.010000" Scale="0.330000"/>
+        <Keyboard KernelDuration="0.700000" KernelFunction="Default" Power="1.500000" Scale="0.330000"/>
+        <Pad KernelDuration="0.300000" KernelFunction="Default" Power="1.500000" Scale="0.330000"/>
+        <Tilt KernelDuration="0.200000" KernelFunction="Default" Power="1.200000" Scale="0.330000"/>
+      </Sensor>
+      <Steer Keyboard="WASD" Mouse="Active" Pad="AnalogueLeft" PadDualShock="AnalogueLeft"/>
+      <Propel Keyboard="Space" Mouse="ButtonLeft" Pad="A"/>
+      <Pause Keyboard="P" Mouse="Off" Pad="Back"/>
+      <Start Keyboard="Off" Mouse="Off" Pad="Start"/>
+    </Controls>
+    <Audio Music="10" SFX="10"/>
+    <Graphics>
+      <Grass>
+        <Density Setting="Ultra">
+          <Blade>
+            <Low GrassPerCell="512" GrassPerClump="128"/>
+            <Medium GrassPerCell="1024" GrassPerClump="256"/>
+            <High GrassPerCell="1024" GrassPerClump="256"/>
+            <Ultra GrassPerCell="2048" GrassPerClump="512"/>
+          </Blade>
+          <Debris>
+            <Low GrassPerCell="512" GrassPerClump="128"/>
+            <Medium GrassPerCell="1024" GrassPerClump="256"/>
+            <High GrassPerCell="1024" GrassPerClump="256"/>
+            <Ultra GrassPerCell="2048" GrassPerClump="512"/>
+          </Debris>
+          <Filler>
+            <Low GrassPerCell="512" GrassPerClump="128"/>
+            <Medium GrassPerCell="1024" GrassPerClump="256"/>
+            <High GrassPerCell="1024" GrassPerClump="256"/>
+            <Ultra GrassPerCell="2048" GrassPerClump="512"/>
+          </Filler>
+        </Density>
+        <Distance Setting="Ultra">
+          <Low Bias="2.0" Scale="0.75" ScaleSq="0.00153"/>
+          <Medium Bias="3.0" Scale="0.5" ScaleSq="0.0"/>
+          <High Bias="15.0" Scale="0.4" ScaleSq="0.0"/>
+          <Ultra Bias="25.0" Scale="0.3" ScaleSq="0.0"/>
+        </Distance>
+      </Grass>
+      <BladeInterpolation Setting="Low">
+        <Low VertPerInstance="4"/>
+        <Medium VertPerInstance="6"/>
+        <High VertPerInstance="10"/>
+        <Ultra VertPerInstance="14"/>
+      </BladeInterpolation>
+      <Effects Setting="Ultra">
+        <Low Ripple="128" Terrain="256" Wind="128"/>
+        <Medium Ripple="256" Terrain="512" Wind="256"/>
+        <High Ripple="512" Terrain="1024" Wind="512"/>
+        <Ultra Ripple="1024" Terrain="2048" Wind="1024"/>
+      </Effects>
+      <Screen Anisotrophy="16" FullScreen="false" Height="2160" MultiSampleCount="4" VSync="true" Width="2160"/>
+      <System>
+        <Lock IB="Dynamic" Tex2D="Staging" VB="Dynamic"/>
+        <Cloth Method="Mixed"/>
+        <TimeSmoothing Method="CappedDiscard" Value="25"/>
+      </System>
+    </Graphics>
+    <System>
+      <Threads Default="-1" MainHelps="false" Max="6" Min="2"/>
+      <Log Crash="false"/>
+      <Language ID="Default"/>
+    </System>
+  </Settings>
+</Root>

@@ -1,7 +1,9 @@
 [stereo]
+render=double
 enabled=1
 separation=0.065
 shiftEyePosition=0
+lens=off
 
 [debug]
 fakepad=1
@@ -10,3 +12,5 @@ fakepad=1
 [xr]
 headCamera=1
 
+cameraBack=1.25
+cameraUp=0.50
