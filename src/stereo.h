@@ -28,6 +28,8 @@ struct StereoConfig
     float worldScale = 1.0f;         // game units per real-world meter (headset)
     bool  shiftEyePosition = false;  // billboard toward each eye vs. head center
     bool  doubleRender = false;      // [stereo] render=double: both eyes every frame
+    int   lensMode = 0;              // game fisheye post pass: 0 game, 1 fixed, 2 off
+    bool  lensLockPending = false;   // fixed: lock at the next observed strength
 };
 
 StereoConfig& Stereo();

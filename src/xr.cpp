@@ -1,5 +1,6 @@
 #include "xr.h"
 #include "log.h"
+#include "keys.h"
 #include "stereo.h"
 #include "shadow.h"
 #include <Windows.h>
@@ -454,7 +455,7 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
         XrSpaceLocation head{ XR_TYPE_SPACE_LOCATION };
         bool headOk = XR_SUCCEEDED(xrLocateSpace_(g_viewSpace, g_localSpace, li.displayTime, &head)) &&
             (head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT);
-        if (headOk && (!g_refSet || (GetAsyncKeyState(VK_F6) & 1) || g_recenterPending))
+        if (headOk && (!g_refSet || KeyEdge(VK_F6) || g_recenterPending))
         {
             Recenter(head.pose);
             g_recenterPending = false;
@@ -463,10 +464,10 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
         // Live comfort tuning: [ ] back/forward, , . down/up (0.25 m steps).
         {
             float back = g_camBack, up = g_camUp;
-            if (GetAsyncKeyState(VK_OEM_4) & 1) back += 0.25f;      // [
-            if (GetAsyncKeyState(VK_OEM_6) & 1) back -= 0.25f;      // ]
-            if (GetAsyncKeyState(VK_OEM_COMMA) & 1) up -= 0.25f;    // ,
-            if (GetAsyncKeyState(VK_OEM_PERIOD) & 1) up += 0.25f;   // .
+            if (KeyEdge(VK_OEM_4)) back += 0.25f;      // [
+            if (KeyEdge(VK_OEM_6)) back -= 0.25f;      // ]
+            if (KeyEdge(VK_OEM_COMMA)) up -= 0.25f;    // ,
+            if (KeyEdge(VK_OEM_PERIOD)) up += 0.25f;   // .
             if (back != g_camBack || up != g_camUp)
             {
                 g_camBack = back; g_camUp = up;
@@ -483,7 +484,7 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
             // Debug (F5): pretend the head is turned 30 deg to the right, to verify
             // rotation direction without wearing the headset.
             static bool fakeTurn = false;
-            if (GetAsyncKeyState(VK_F5) & 1) { fakeTurn = !fakeTurn; Log("[xr] F5: fake 30 deg right turn = %d", fakeTurn); }
+            if (KeyEdge(VK_F5)) { fakeTurn = !fakeTurn; Log("[xr] F5: fake 30 deg right turn = %d", fakeTurn); }
             if (fakeTurn) refInv = QMul({ 0, sinf(-0.2618f), 0, cosf(-0.2618f) }, refInv);
             for (int e = 0; e < 2; ++e)
             {

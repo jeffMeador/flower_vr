@@ -1,5 +1,6 @@
 #include "camfind.h"
 #include "log.h"
+#include "keys.h"
 #include <Windows.h>
 #include <TlHelp32.h>
 #include <cmath>
@@ -175,14 +176,14 @@ void CamFindTick(float backbufferAspect)
         return;
     }
     if (g_disarmAt) return;
-    if (GetAsyncKeyState(VK_F4) & 1)
+    if (KeyEdge(VK_F4))
     {
         // F4: who reads/writes the render camera matrix (x axis at node+0x90)?
         void* node = CamOverrideCameraNode();
         if (node) StartWatch((char*)node + 0x90, "camera matrix");
         return;
     }
-    if (!(GetAsyncKeyState(VK_F7) & 1)) return;
+    if (!KeyEdge(VK_F7)) return;
 
     float* cam = FindCamera(backbufferAspect);
     if (!cam) return;
