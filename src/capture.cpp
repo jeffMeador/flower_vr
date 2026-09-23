@@ -177,8 +177,14 @@ static void ReflectAndCacheOffsets(ID3D11VertexShader* shader, const void* bytec
     // Drop patches that don't fit in the reflected cbuffer (defensive).
     std::vector<PatchVar> kept;
     for (auto& p : offsets.patches)
-        if (p.offset + (p.kind == PatchKind::EyePos ? 12u : 64u) <= offsets.cbSize)
-            kept.push_back(p);
+    {
+        if (p.offset + (p.kind == PatchKind::EyePos ? 12u : p.kind == PatchKind::LensFov ? 4u : 64u) > offsets.cbSize)
+            continue;
+        // A lone "fov" without R/maxRadius isn't the lens shader.
+        if (p.kind == PatchKind::LensFov && !(offsets.hasLensR && offsets.hasLensMaxR))
+            continue;
+        kept.push_back(p);
+    }
     offsets.patches.swap(kept);
 
     g_offsets[shader] = offsets;
@@ -365,6 +371,18 @@ static void PrepareDraw(ID3D11DeviceContext* self)
             case PatchKind::EyePos:
                 if (eyePos) { f[0] += eyeOff[0]; f[1] += eyeOff[1]; f[2] += eyeOff[2]; any = true; }
                 break;
+            case PatchKind::LensFov:
+            {
+                // fov -> 0 with R = maxRadius / tan(fov/2) turns the fisheye
+                // mapping uv = 0.5 + xy * R*tan(r/maxR * fov/2)/r into the identity.
+                if (off.lensROffset + 4 > patched.size() || off.lensMaxROffset + 4 > patched.size()) break;
+                const float tiny = 1e-4f;
+                float maxR = *reinterpret_cast<const float*>(patched.data() + off.lensMaxROffset);
+                f[0] = tiny;
+                *reinterpret_cast<float*>(patched.data() + off.lensROffset) = maxR / tanf(tiny * 0.5f);
+                any = true;
+                break;
+            }
             }
         }
     }
