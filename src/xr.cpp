@@ -2,6 +2,7 @@
 #include "log.h"
 #include "keys.h"
 #include "stereo.h"
+#include "shadow.h"
 #include <Windows.h>
 #include <cmath>
 #include <cstdio>
@@ -59,6 +60,7 @@ static EyeSwapchain g_eyes[2];
 static UINT g_size = 0;                 // square swapchain edge, pixels
 static DXGI_FORMAT g_format = DXGI_FORMAT_UNKNOWN;
 static ID3D11Texture2D* g_resolve = nullptr; // for MSAA backbuffers
+static ID3D11Texture2D* g_resolveRight = nullptr;
 static uint64_t g_submitted = 0;
 
 static const char* ResultStr(XrResult r)
@@ -89,7 +91,7 @@ void XrInit(ID3D11Device* device, const wchar_t* dllDir)
     wchar_t buf[32];
     GetPrivateProfileStringW(L"xr", L"cameraBack", L"1.0", buf, 32, ini); g_camBack = (float)_wtof(buf);
     GetPrivateProfileStringW(L"xr", L"cameraUp", L"0.25", buf, 32, ini); g_camUp = (float)_wtof(buf);
-    Log("[xr] camera offset: back %.2f m, up %.2f m", g_camBack, g_camUp);
+    Log("[xr] camera offset: back %.2f, up %.2f game units", g_camBack, g_camUp);
 }
 
 static bool LoadLoader()
@@ -254,6 +256,7 @@ static bool CreateSession(IDXGISwapChain* gameSwapChain)
         rd.SampleDesc.Count = 1; rd.SampleDesc.Quality = 0;
         rd.BindFlags = 0; rd.MiscFlags = 0;
         g_device->CreateTexture2D(&rd, nullptr, &g_resolve);
+        g_device->CreateTexture2D(&rd, nullptr, &g_resolveRight);
     }
 
     Log("[xr] session created, waiting for READY");
@@ -403,6 +406,26 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
             ctx->ResolveSubresource(g_resolve, 0, bb, 0, desc.Format);
             src = g_resolve;
         }
+        if (renderedEye == 2)
+        {
+            // Double render: left eye in the backbuffer, right eye in its twin.
+            ID3D11Resource* twin = ShadowOfResource(bb);
+            ID3D11Texture2D* twinSrc = (ID3D11Texture2D*)twin;
+            if (twin && g_resolve)
+            {
+                ctx->ResolveSubresource(g_resolveRight ? g_resolveRight : g_resolve, 0, twin, 0, desc.Format);
+                twinSrc = g_resolveRight ? g_resolveRight : g_resolve;
+            }
+            CopyToEye(0, ctx, src, desc);
+            if (twinSrc) CopyToEye(1, ctx, twinSrc, desc);
+            if (twin) twin->Release();
+            if (g_givenValid && twinSrc)
+            {
+                g_imagePose[0] = g_givenPose[0]; g_imagePose[1] = g_givenPose[1];
+                g_imagePoseValid[0] = g_imagePoseValid[1] = true;
+            }
+        }
+        else
         for (int e = 0; e < 2; ++e)
         {
             if ((e == 0 && renderedEye > 0) || (e == 1 && renderedEye < 0)) continue;
@@ -451,12 +474,16 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
                 wchar_t v[32];
                 swprintf_s(v, L"%.2f", back); WritePrivateProfileStringW(L"xr", L"cameraBack", v, g_iniPath);
                 swprintf_s(v, L"%.2f", up); WritePrivateProfileStringW(L"xr", L"cameraUp", v, g_iniPath);
-                Log("[xr] camera offset: back %.2f m, up %.2f m (saved)", back, up);
+                Log("[xr] camera offset: back %.2f, up %.2f game units (saved)", back, up);
             }
         }
 
         if (located && g_refSet)
         {
+            // Camera offsets are game distances: pre-divide by worldScale, which
+            // the stereo code multiplies every pose by (so F10/F11 don't shrink them).
+            float ws = Stereo().worldScale;
+            float camToMeters = 1.0f / (ws > 1e-4f ? ws : 1e-4f);
             XrQuaternionf refInv = QConj(g_ref.orientation);
             // Debug (F5): pretend the head is turned 30 deg to the right, to verify
             // rotation direction without wearing the headset.
@@ -474,7 +501,7 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
                                  views[e].pose.position.y - g_ref.position.y,
                                  views[e].pose.position.z - g_ref.position.z };
                 XrVector3f p = QRot(refInv, d);
-                float rot[9], pos[3] = { p.x, p.y + g_camUp, p.z + g_camBack };
+                float rot[9], pos[3] = { p.x, p.y + g_camUp * camToMeters, p.z + g_camBack * camToMeters };
                 QToMat(q, rot);
                 StereoSetEyePose(e, rot, pos);
                 g_givenPose[e] = views[e].pose;
@@ -489,7 +516,7 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
                                  head.pose.position.y - g_ref.position.y,
                                  head.pose.position.z - g_ref.position.z };
                 XrVector3f p = QRot(refInv, d);
-                float rot[9], pos[3] = { p.x, p.y + g_camUp, p.z + g_camBack };
+                float rot[9], pos[3] = { p.x, p.y + g_camUp * camToMeters, p.z + g_camBack * camToMeters };
                 QToMat(q, rot);
                 StereoSetHeadPose(rot, pos);
             }

@@ -16,14 +16,15 @@ static float g_right[3] = {}, g_up[3] = {}, g_fwd[3] = {}; // canonical axes in 
 
 struct EyePose { bool set = false; float rot[9]; float pos[3]; };
 struct DisplayFov { bool set = false; float tanL, tanR, tanU, tanD, cropX, cropY; };
-static EyePose g_pendingPose[2], g_activePose;
+static EyePose g_pendingPose[2], g_activePoses[2];
+static int g_renderEye = 0; // which eye draws are being patched for (0 left, 1 right)
 static DisplayFov g_display[2];
 
 // Cached K = P_new * T * P_game^-1 for the current key.
-static uint64_t g_kKey = 0;
-static Mat4 g_K;
-static float g_viewShiftX = 0; // canonical x translation of T (for modelView)
-static float g_eyeWorld[3] = {};
+static uint64_t g_kKey[2] = {};
+static Mat4 g_K[2];
+static float g_viewShiftX[2] = {}; // canonical x translation of T (for modelView)
+static float g_eyeWorld[2][3] = {};
 
 StereoConfig& Stereo() { return g_cfg; }
 
@@ -41,12 +42,18 @@ void StereoLoadConfig(const wchar_t* dllDir)
     g_cfg.enabled = ReadIniFloat(L"enabled", 1.0f) != 0.0f;
     g_cfg.separation = ReadIniFloat(L"separation", g_cfg.separation);
     g_cfg.worldScale = ReadIniFloat(L"worldScale", g_cfg.worldScale);
+    if (g_cfg.worldScale < 0.1f) g_cfg.worldScale = 0.1f;
+    if (g_cfg.worldScale > 10.0f) g_cfg.worldScale = 10.0f;
     g_cfg.shiftEyePosition = ReadIniFloat(L"shiftEyePosition", 0.0f) != 0.0f;
+    wchar_t mode[32];
+    GetPrivateProfileStringW(L"stereo", L"render", L"alternate", mode, 32, g_iniPath);
+    g_cfg.doubleRender = _wcsicmp(mode, L"double") == 0;
     wchar_t lens[32];
     GetPrivateProfileStringW(L"stereo", L"lens", L"game", lens, 32, g_iniPath);
     g_cfg.lensMode = _wcsicmp(lens, L"fixed") == 0 ? 1 : _wcsicmp(lens, L"off") == 0 ? 2 : 0;
-    Log("[stereo] config: enabled=%d separation=%.4f worldScale=%.3f shiftEyePosition=%d lens=%d",
-        g_cfg.enabled, g_cfg.separation, g_cfg.worldScale, g_cfg.shiftEyePosition, g_cfg.lensMode);
+    Log("[stereo] config: enabled=%d render=%s separation=%.4f worldScale=%.3f shiftEyePosition=%d lens=%d",
+        g_cfg.enabled, g_cfg.doubleRender ? "double" : "alternate", g_cfg.separation, g_cfg.worldScale,
+        g_cfg.shiftEyePosition, g_cfg.lensMode);
 }
 
 static void SaveIni(const wchar_t* key, const wchar_t* value)
@@ -56,6 +63,12 @@ static void SaveIni(const wchar_t* key, const wchar_t* value)
 
 static void SaveScale()
 {
+    // Keep world scale sane: it once collapsed to 0.0012 (flat image, no
+    // head-movement parallax) when each key press fired several times.
+    if (g_cfg.worldScale < 0.1f) g_cfg.worldScale = 0.1f;
+    if (g_cfg.worldScale > 10.0f) g_cfg.worldScale = 10.0f;
+    if (g_cfg.separation < 0.0065f) g_cfg.separation = 0.0065f;
+    if (g_cfg.separation > 0.65f) g_cfg.separation = 0.65f;
     wchar_t v[32];
     swprintf_s(v, L"%.4f", g_cfg.worldScale); SaveIni(L"worldScale", v);
     swprintf_s(v, L"%.4f", g_cfg.separation); SaveIni(L"separation", v);
@@ -76,7 +89,9 @@ void StereoFrameBoundary()
     ++g_frame;
     ++g_key;
     g_eye = -g_eye;
-    g_activePose = g_pendingPose[EyeIndex()];
+    g_activePoses[0] = g_pendingPose[0];
+    g_activePoses[1] = g_pendingPose[1];
+    if (!g_cfg.doubleRender) g_renderEye = EyeIndex();
 
     if (KeyPressed(VK_F9))
     {
@@ -110,6 +125,11 @@ void StereoFrameBoundary()
         g_cfg.shiftEyePosition = !g_cfg.shiftEyePosition;
         Log("[stereo] F8: shiftEyePosition=%d", g_cfg.shiftEyePosition);
     }
+}
+
+void StereoSetRenderEye(int eyeIndex)
+{
+    g_renderEye = eyeIndex ? 1 : 0;
 }
 
 int StereoCurrentEye()
@@ -241,14 +261,15 @@ void StereoSetDisplayFov(int eyeIndex, float tanL, float tanR, float tanU, float
 
 static const DisplayFov* CurrentDisplay()
 {
-    const DisplayFov& d = g_display[EyeIndex()];
+    const DisplayFov& d = g_display[g_renderEye];
     return d.set ? &d : nullptr;
 }
 
 uint64_t StereoPatchKey()
 {
     if (!g_projKnown) return 0;
-    return (StereoCurrentEye() != 0 || CurrentDisplay() || g_activePose.set) ? g_key : 0;
+    if (!(StereoCurrentEye() != 0 || g_cfg.doubleRender || CurrentDisplay() || g_activePoses[g_renderEye].set)) return 0;
+    return (g_key << 1) | (uint64_t)g_renderEye; // distinct per eye
 }
 
 static Mat4 Identity()
@@ -271,7 +292,7 @@ static void BuildK()
     // T: world (game camera) canonical space -> eye canonical space.
     Mat4 t = Identity();
     float eyeCanon[3] = {};
-    if (g_activePose.set)
+    if (g_activePoses[g_renderEye].set)
     {
         // OpenXR poses (R, p) in x right / y up / z back; canonical flips z.
         // The rendered camera already includes the applied head pose H, so
@@ -285,8 +306,8 @@ static void BuildK()
         float ph[3] = {};
         if (h.set) for (int i = 0; i < 3; ++i) ph[i] = h.pos[i] * g_cfg.worldScale;
 
-        const float* Re = g_activePose.rot;
-        float pe[3] = { g_activePose.pos[0] * g_cfg.worldScale, g_activePose.pos[1] * g_cfg.worldScale, g_activePose.pos[2] * g_cfg.worldScale };
+        const float* Re = g_activePoses[g_renderEye].rot;
+        float pe[3] = { g_activePoses[g_renderEye].pos[0] * g_cfg.worldScale, g_activePoses[g_renderEye].pos[1] * g_cfg.worldScale, g_activePoses[g_renderEye].pos[2] * g_cfg.worldScale };
         const float s[3] = { 1, 1, -1 };
         for (int i = 0; i < 3; ++i)
         {
@@ -310,13 +331,14 @@ static void BuildK()
     }
     else
     {
-        float e = StereoCurrentEye() * 0.5f * g_cfg.separation;
+        int sign = g_cfg.doubleRender ? (g_renderEye ? 1 : -1) : StereoCurrentEye();
+        float e = sign * 0.5f * g_cfg.separation;
         t.m[0][3] = -e;
         eyeCanon[0] = e;
     }
-    g_viewShiftX = t.m[0][3];
+    g_viewShiftX[g_renderEye] = t.m[0][3];
     for (int i = 0; i < 3; ++i)
-        g_eyeWorld[i] = eyeCanon[0] * g_right[i] + eyeCanon[1] * g_up[i] + eyeCanon[2] * g_fwd[i];
+        g_eyeWorld[g_renderEye][i] = eyeCanon[0] * g_right[i] + eyeCanon[1] * g_up[i] + eyeCanon[2] * g_fwd[i];
 
     // P_new: headset eye FOV into the crop, or the game's own projection.
     Mat4 pn{};
@@ -337,24 +359,24 @@ static void BuildK()
     pn.m[2][3] = g_B;
     pn.m[3][2] = 1.0f;
 
-    g_K = Mat4Mul(Mat4Mul(pn, t), pinv);
-    g_kKey = g_key;
+    g_K[g_renderEye] = Mat4Mul(Mat4Mul(pn, t), pinv);
+    g_kKey[g_renderEye] = g_key;
     if ((g_frame % 450) == 0)
     {
         // eye forward in reference space is -R[:,2]; yaw 0 = straight ahead, + = left
-        const float* R = g_activePose.rot;
-        Log("[stereo] K eye=%d pose=%d yaw=%.1f pitch=%.1f pos=(%.3f %.3f %.3f) T0=(%.3f %.3f %.3f %.3f)", g_eye, g_activePose.set,
-            g_activePose.set ? atan2f(R[2], R[8]) * 57.2958f : 0.0f, g_activePose.set ? asinf(-R[5]) * 57.2958f : 0.0f,
-            g_activePose.pos[0], g_activePose.pos[1], g_activePose.pos[2], t.m[0][0], t.m[0][1], t.m[0][2], t.m[0][3]);
+        const float* R = g_activePoses[g_renderEye].rot;
+        Log("[stereo] K eye=%d pose=%d yaw=%.1f pitch=%.1f pos=(%.3f %.3f %.3f) T0=(%.3f %.3f %.3f %.3f)", g_eye, g_activePoses[g_renderEye].set,
+            g_activePoses[g_renderEye].set ? atan2f(R[2], R[8]) * 57.2958f : 0.0f, g_activePoses[g_renderEye].set ? asinf(-R[5]) * 57.2958f : 0.0f,
+            g_activePoses[g_renderEye].pos[0], g_activePoses[g_renderEye].pos[1], g_activePoses[g_renderEye].pos[2], t.m[0][0], t.m[0][1], t.m[0][2], t.m[0][3]);
     }
 }
 
 void StereoPatchClip(float* m)
 {
-    if (g_kKey != g_key) BuildK();
+    if (g_kKey[g_renderEye] != g_key) BuildK();
     Mat4 in;
     memcpy(&in, m, 64);
-    Mat4 out = Mat4Mul(g_K, in);
+    Mat4 out = Mat4Mul(g_K[g_renderEye], in);
     memcpy(m, &out, 64);
 }
 
@@ -362,14 +384,14 @@ void StereoPatchView(float* m)
 {
     // modelView is in the game's own view space, whose axis signs we don't
     // know beyond x; apply only the sideways part of the eye offset.
-    if (g_kKey != g_key) BuildK();
-    m[3] += g_viewShiftX; // [0][3]
+    if (g_kKey[g_renderEye] != g_key) BuildK();
+    m[3] += g_viewShiftX[g_renderEye]; // [0][3]
 }
 
 bool StereoWorldEyeOffset(float out[3])
 {
     if (!g_cfg.shiftEyePosition || StereoPatchKey() == 0) return false;
-    if (g_kKey != g_key) BuildK();
-    memcpy(out, g_eyeWorld, sizeof(g_eyeWorld));
+    if (g_kKey[g_renderEye] != g_key) BuildK();
+    memcpy(out, g_eyeWorld[g_renderEye], sizeof(g_eyeWorld[g_renderEye]));
     return true;
 }

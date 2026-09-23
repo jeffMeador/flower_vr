@@ -25,8 +25,9 @@ struct StereoConfig
 {
     bool  enabled = true;
     float separation = 0.065f;       // world units between eyes (no headset)
-    float worldScale = 1.0f;         // game units per real-world meter (headset)
+    float worldScale = 0.3f;         // game units per real-world meter (headset); 0.3 chosen by A/B test vs 1.0
     bool  shiftEyePosition = false;  // billboard toward each eye vs. head center
+    bool  doubleRender = false;      // [stereo] render=double: both eyes every frame
     int   lensMode = 0;              // game fisheye post pass: 0 game, 1 fixed, 2 off
     bool  lensLockPending = false;   // fixed: lock at the next observed strength
 };
@@ -37,7 +38,10 @@ void StereoLoadConfig(const wchar_t* dllDir);
 // Called once per Present: flips eye, latches this frame's eye view, hotkeys.
 void StereoFrameBoundary();
 
-// Current eye: -1 = left, +1 = right, 0 = mono (stereo disabled or not ready).
+// Double render: which eye the following draws are patched for (0 left, 1 right).
+void StereoSetRenderEye(int eyeIndex);
+
+// Alternate-eye mode: current eye: -1 = left, +1 = right, 0 = mono.
 int StereoCurrentEye();
 
 // Feed a recovered mono ViewProj (from any draw exposing both model and MVP).
