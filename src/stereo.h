@@ -25,7 +25,7 @@ struct StereoConfig
 {
     bool  enabled = true;
     float separation = 0.065f;       // world units between eyes (no headset)
-    float worldScale = 1.0f;         // game units per real-world meter (headset)
+    float worldScale = 0.3f;         // game units per real-world meter (headset); 0.3 chosen by A/B test vs 1.0
     bool  shiftEyePosition = false;  // billboard toward each eye vs. head center
     bool  doubleRender = false;      // [stereo] render=double: both eyes every frame
     int   lensMode = 0;              // game fisheye post pass: 0 game, 1 fixed, 2 off
