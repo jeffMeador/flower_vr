@@ -5,44 +5,78 @@
 #include <cwctype>
 #include <string>
 
-// The game keeps its settings (resolution, MSAA, ...) in
-// Documents\Flower\Flower.cfg, shared with the non-VR Steam install. In VR we
-// want a square render resolution, so reads/writes of that file are redirected
-// to <game dir>\vrmod_Flower.cfg when it exists. The user's own file is never
-// touched.
+// File redirects, so the mod never has to modify the user's or the game's files:
+//
+//  - Documents\Flower\Flower.cfg (resolution, MSAA, ... shared with the non-VR
+//    Steam install) -> <game dir>\vrmod_Flower.cfg, if that file exists, so
+//    VR can use a square render resolution.
+//  - Any game data file <...>\Data\<relative path> -> <game dir>\vrmod_overrides\
+//    <relative path>, if an override file exists there (e.g. a Scripts\
+//    MovieBarn.lua that turns the level movies off). Delete the folder to undo.
 
 using CreateFileW_t = HANDLE(WINAPI*)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 using CreateFileA_t = HANDLE(WINAPI*)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 static CreateFileW_t realCreateFileW;
 static CreateFileA_t realCreateFileA;
-static std::wstring g_target;
-static bool g_loggedOnce = false;
+static std::wstring g_cfgTarget;     // empty = no settings redirect
+static std::wstring g_overrideDir;   // empty = no overrides folder
+static bool g_loggedCfg = false;
 
-static bool IsGameCfg(const wchar_t* path)
+static bool EndsWithI(const wchar_t* path, const wchar_t* suffix)
 {
-    if (!path) return false;
-    size_t n = wcslen(path);
-    const wchar_t* suffix = L"\\Flower\\Flower.cfg";
-    size_t m = wcslen(suffix);
+    size_t n = wcslen(path), m = wcslen(suffix);
     if (n < m) return false;
     const wchar_t* tail = path + n - m;
     for (size_t i = 0; i < m; ++i)
     {
         wchar_t a = tail[i] == L'/' ? L'\\' : towlower(tail[i]);
-        wchar_t b = towlower(suffix[i]);
-        if (a != b) return false;
+        if (a != towlower(suffix[i])) return false;
     }
     return true;
 }
 
+// Returns the override path for a game data file, or empty.
+static std::wstring OverrideFor(const wchar_t* path)
+{
+    if (g_overrideDir.empty()) return {};
+    std::wstring p(path);
+    for (auto& c : p) if (c == L'/') c = L'\\';
+    std::wstring lower = p;
+    for (auto& c : lower) c = towlower(c);
+    size_t at = lower.rfind(L"\\data\\");
+    if (at == std::wstring::npos) return {};
+    std::wstring candidate = g_overrideDir + L"\\" + p.substr(at + 6);
+    return GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES ? candidate : std::wstring();
+}
+
+static HANDLE Redirected(const wchar_t* name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES sa, DWORD disp, DWORD flags, HANDLE tmpl, bool* handled)
+{
+    *handled = false;
+    if (!name) return INVALID_HANDLE_VALUE;
+    if (!g_cfgTarget.empty() && EndsWithI(name, L"\\Flower\\Flower.cfg"))
+    {
+        if (!g_loggedCfg) { g_loggedCfg = true; Log("[redirect] %ls -> %ls", name, g_cfgTarget.c_str()); }
+        *handled = true;
+        return realCreateFileW(g_cfgTarget.c_str(), access, share, sa, disp, flags, tmpl);
+    }
+    if (!(access & GENERIC_WRITE))
+    {
+        std::wstring o = OverrideFor(name);
+        if (!o.empty())
+        {
+            Log("[redirect] override: %ls -> %ls", name, o.c_str());
+            *handled = true;
+            return realCreateFileW(o.c_str(), access, share, sa, disp, flags, tmpl);
+        }
+    }
+    return INVALID_HANDLE_VALUE;
+}
+
 static HANDLE WINAPI Hook_CreateFileW(LPCWSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES sa, DWORD disp, DWORD flags, HANDLE tmpl)
 {
-    if (IsGameCfg(name))
-    {
-        if (!g_loggedOnce) { g_loggedOnce = true; Log("[redirect] %ls -> %ls", name, g_target.c_str()); }
-        return realCreateFileW(g_target.c_str(), access, share, sa, disp, flags, tmpl);
-    }
-    return realCreateFileW(name, access, share, sa, disp, flags, tmpl);
+    bool handled;
+    HANDLE h = Redirected(name, access, share, sa, disp, flags, tmpl, &handled);
+    return handled ? h : realCreateFileW(name, access, share, sa, disp, flags, tmpl);
 }
 
 static HANDLE WINAPI Hook_CreateFileA(LPCSTR name, DWORD access, DWORD share, LPSECURITY_ATTRIBUTES sa, DWORD disp, DWORD flags, HANDLE tmpl)
@@ -50,10 +84,11 @@ static HANDLE WINAPI Hook_CreateFileA(LPCSTR name, DWORD access, DWORD share, LP
     if (name)
     {
         wchar_t w[MAX_PATH];
-        if (MultiByteToWideChar(CP_ACP, 0, name, -1, w, MAX_PATH) && IsGameCfg(w))
+        if (MultiByteToWideChar(CP_ACP, 0, name, -1, w, MAX_PATH))
         {
-            if (!g_loggedOnce) { g_loggedOnce = true; Log("[redirect] %s -> %ls", name, g_target.c_str()); }
-            return realCreateFileW(g_target.c_str(), access, share, sa, disp, flags, tmpl);
+            bool handled;
+            HANDLE h = Redirected(w, access, share, sa, disp, flags, tmpl, &handled);
+            if (handled) return h;
         }
     }
     return realCreateFileA(name, access, share, sa, disp, flags, tmpl);
@@ -61,12 +96,15 @@ static HANDLE WINAPI Hook_CreateFileA(LPCSTR name, DWORD access, DWORD share, LP
 
 bool FileRedirectInstall(const wchar_t* gameDir)
 {
-    g_target = std::wstring(gameDir) + L"\\vrmod_Flower.cfg";
-    if (GetFileAttributesW(g_target.c_str()) == INVALID_FILE_ATTRIBUTES)
-    {
-        Log("[redirect] no vrmod_Flower.cfg; using the normal settings file");
-        return false;
-    }
+    std::wstring cfg = std::wstring(gameDir) + L"\\vrmod_Flower.cfg";
+    std::wstring dir = std::wstring(gameDir) + L"\\vrmod_overrides";
+    bool haveCfg = GetFileAttributesW(cfg.c_str()) != INVALID_FILE_ATTRIBUTES;
+    DWORD da = GetFileAttributesW(dir.c_str());
+    bool haveDir = da != INVALID_FILE_ATTRIBUTES && (da & FILE_ATTRIBUTE_DIRECTORY);
+    if (haveCfg) g_cfgTarget = cfg; else Log("[redirect] no vrmod_Flower.cfg; using the normal settings file");
+    if (haveDir) { g_overrideDir = dir; Log("[redirect] data overrides from %ls", dir.c_str()); }
+    if (!haveCfg && !haveDir) return false;
+
     MH_Initialize(); // harmless if already initialized
     HMODULE kb = GetModuleHandleW(L"kernelbase.dll");
     void* w = kb ? (void*)GetProcAddress(kb, "CreateFileW") : nullptr;
@@ -74,6 +112,6 @@ bool FileRedirectInstall(const wchar_t* gameDir)
     bool ok = w && a &&
         MH_CreateHook(w, (void*)&Hook_CreateFileW, (void**)&realCreateFileW) == MH_OK && MH_EnableHook(w) == MH_OK &&
         MH_CreateHook(a, (void*)&Hook_CreateFileA, (void**)&realCreateFileA) == MH_OK && MH_EnableHook(a) == MH_OK;
-    Log("[redirect] settings file redirect to %ls: %s", g_target.c_str(), ok ? "installed" : "FAILED");
-    return ok;
+    Log("[redirect] file redirect hooks: %s", ok ? "installed" : "FAILED");
+    return ok && haveCfg; // display modes are only needed for the VR settings file
 }
