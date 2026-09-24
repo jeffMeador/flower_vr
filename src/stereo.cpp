@@ -141,7 +141,7 @@ void StereoFrameBoundary()
     {
         g_cfg.motionBlur = !g_cfg.motionBlur;
         SaveIni(L"motionBlur", g_cfg.motionBlur ? L"1" : L"0");
-        Log("[stereo] F5: motion blur %s", g_cfg.motionBlur ? "on" : "off");
+        Log("[stereo] F5: motion trails (motion blur + glare history) %s", g_cfg.motionBlur ? "on" : "off");
     }
     if (KeyPressed(VK_F8))
     {

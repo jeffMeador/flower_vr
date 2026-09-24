@@ -66,10 +66,16 @@ struct ContextState
     ID3D11Resource* psCB[4] = {};
 };
 
-// Pixel shaders with depth of field ("blurZRanges": blur = clamp(max((Z-x)*y,
-// (Z-z)*w))); with DoF off in VR y and w are zeroed, i.e. always sharp.
-struct PixelDof { UINT slot; UINT offset; };
-static std::unordered_map<ID3D11PixelShader*, PixelDof> g_psDof;
+// Pixel-shader constants overridden while in VR, per shader: depth of field
+// (blurZRanges slopes -> 0) and glare trails (glare history off).
+struct PixelOverride
+{
+    enum Kind { DepthOfField, Trails } kind;
+    UINT slot;
+    UINT offset;
+    float value;
+};
+static std::unordered_map<ID3D11PixelShader*, std::vector<PixelOverride>> g_psOverrides;
 static std::unordered_map<ID3D11DeviceContext*, ContextState> g_contextState;
 
 static std::atomic<uint64_t> g_captureFrame{ 0 };
@@ -250,6 +256,9 @@ static HRESULT STDMETHODCALLTYPE Hook_CreatePixelShader(ID3D11Device* self, cons
     if (FAILED(D3DReflect(bytecode, len, IID_ID3D11ShaderReflection, (void**)&refl)) || !refl) return hr;
     D3D11_SHADER_DESC sd = {};
     refl->GetDesc(&sd);
+    std::vector<PixelOverride> ov;
+    bool glareInt = false, accumInt = false;
+    UINT glareSlot = 0, glareOff = 0, accumOff = 0;
     for (UINT cb = 0; cb < sd.ConstantBuffers; ++cb)
     {
         ID3D11ShaderReflectionConstantBuffer* cbr = refl->GetConstantBufferByIndex(cb);
@@ -261,13 +270,30 @@ static HRESULT STDMETHODCALLTYPE Hook_CreatePixelShader(ID3D11Device* self, cons
         {
             D3D11_SHADER_VARIABLE_DESC vd = {};
             cbr->GetVariableByIndex(v)->GetDesc(&vd);
-            if (Lower(vd.Name) == "blurzranges" && (vd.uFlags & D3D_SVF_USED))
+            if (!(vd.uFlags & D3D_SVF_USED)) continue;
+            std::string n = Lower(vd.Name);
+            if (n == "blurzranges")
             {
-                g_psDof[*out] = { bd.BindPoint, vd.StartOffset };
+                // Depth of field: blur = clamp(max((Z-x)*y, (Z-z)*w)); zero the slopes.
+                ov.push_back({ PixelOverride::DepthOfField, bd.BindPoint, vd.StartOffset + 4, 0.0f });
+                ov.push_back({ PixelOverride::DepthOfField, bd.BindPoint, vd.StartOffset + 12, 0.0f });
                 Log("[capture] pixel shader with depth of field: blurZRanges in slot %u @%u", bd.BindPoint, vd.StartOffset);
             }
+            else if (n == "glareint") { glareInt = true; glareSlot = bd.BindPoint; glareOff = vd.StartOffset; }
+            else if (n == "accumint") { accumInt = true; accumOff = vd.StartOffset; }
         }
     }
+    if (glareInt && accumInt)
+    {
+        // Glare composite: out = glare*glareInt + previousFramesGlare*accumInt
+        // (0.3/0.7, i.e. the same steady brightness as glare alone). The screen-
+        // space history lags whenever the view turns: in VR that showed as
+        // wobbly 'water' patches during head motion. No history, full glare.
+        ov.push_back({ PixelOverride::Trails, glareSlot, glareOff, 1.0f });
+        ov.push_back({ PixelOverride::Trails, glareSlot, accumOff, 0.0f });
+        Log("[capture] pixel shader with glare accumulation (slot %u @%u/@%u)", glareSlot, glareOff, accumOff);
+    }
+    if (!ov.empty()) g_psOverrides[*out] = ov;
     refl->Release();
     return hr;
 }
@@ -542,30 +568,49 @@ static void PrepareDraw(ID3D11DeviceContext* self)
     s.patchedKey = key;
     g_statPatched++;
 }
-// Depth of field off in VR: if the bound pixel shader reads blurZRanges, write
-// its buffer with the blur slopes zeroed (always sharp). Eye-independent.
-static ShaderOffsets g_dofTag; // identifies "DoF-patched" in the buffer cache
-static void PrepareDof(ID3D11DeviceContext* self)
+// Pixel-shader constant overrides while in VR (depth of field, glare trails):
+// write the bound buffer with the overridden values. Eye-independent.
+static void PreparePixel(ID3D11DeviceContext* self)
 {
-    if (Stereo().depthOfField || StereoPatchKey() == 0) return;
     ContextState& st = g_contextState[self];
-    auto it = g_psDof.find(st.currentPS);
-    if (it == g_psDof.end()) return;
-    ID3D11Resource* buf = st.psCB[it->second.slot];
-    auto sh = g_cbShadow.find(buf);
-    if (sh == g_cbShadow.end() || !sh->second.valid) return;
-    BufferShadow& s = sh->second;
-    if (s.patchedGen == s.gen && s.patchedLayout == &g_dofTag) return; // already sharp
-    if (it->second.offset + 16 > s.data.size()) return;
-    static std::vector<uint8_t> patched;
-    patched = s.data;
-    float* f = reinterpret_cast<float*>(patched.data() + it->second.offset);
-    f[1] = 0.0f; // near-blur slope
-    f[3] = 0.0f; // far-blur slope
-    WriteBuffer(self, buf, s, patched.data());
-    s.patchedGen = s.gen;
-    s.patchedLayout = &g_dofTag;
-    s.patchedKey = 0;
+    auto it = g_psOverrides.find(st.currentPS);
+    if (it == g_psOverrides.end()) return;
+    bool vr = StereoPatchKey() != 0;
+    bool dofOff = vr && !Stereo().depthOfField;
+    bool trailsOff = vr && !Stereo().motionBlur;
+    // Cache tag: this shader's override list (unique address).
+    const ShaderOffsets* tag = reinterpret_cast<const ShaderOffsets*>(&it->second);
+    uint64_t wantKey = 1 + (dofOff ? 1 : 0) + (trailsOff ? 2 : 0);
+
+    for (UINT slot = 0; slot < 4; ++slot)
+    {
+        bool usesSlot = false;
+        for (const PixelOverride& o : it->second) usesSlot |= o.slot == slot;
+        if (!usesSlot) continue;
+        ID3D11Resource* buf = st.psCB[slot];
+        auto sh = g_cbShadow.find(buf);
+        if (sh == g_cbShadow.end() || !sh->second.valid) continue;
+        BufferShadow& s = sh->second;
+        bool ours = s.patchedGen == s.gen && s.patchedLayout == tag;
+        if (ours && s.patchedKey == wantKey) continue; // already as wanted
+
+        static std::vector<uint8_t> patched;
+        patched = s.data;
+        bool any = false;
+        for (const PixelOverride& o : it->second)
+        {
+            if (o.slot != slot || o.offset + 4 > patched.size()) continue;
+            bool active = o.kind == PixelOverride::DepthOfField ? dofOff : trailsOff;
+            if (!active) continue;
+            *reinterpret_cast<float*>(patched.data() + o.offset) = o.value;
+            any = true;
+        }
+        if (!any && !ours) continue; // GPU already holds the game's values
+        WriteBuffer(self, buf, s, patched.data());
+        s.patchedGen = any ? s.gen : ~0ull;
+        s.patchedLayout = tag;
+        s.patchedKey = wantKey;
+    }
 }
 
 // Issue one game draw: patched for the current eye (alternate-eye mode), or
@@ -576,19 +621,19 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw)
     if (!Stereo().doubleRender || ShadowBypassed())
     {
         PrepareDraw(self);
-        PrepareDof(self);
+        PreparePixel(self);
         draw();
         return;
     }
     StereoSetRenderEye(0);
     PrepareDraw(self);
-    PrepareDof(self);
+    PreparePixel(self);
     draw();
     if (ShadowBindRightEye(self))
     {
         StereoSetRenderEye(1);
         PrepareDraw(self);
-        PrepareDof(self);
+        PreparePixel(self);
         draw();
         ShadowRestore(self);
         StereoSetRenderEye(0);
