@@ -18,5 +18,4 @@ Not included, and not to be redistributed:
   with the mod.
 
 This project is a fan mod, not affiliated with or endorsed by thatgamecompany
-or Annapurna Interactive. Screenshots in this repo show the game for
-illustration.
+or Annapurna Interactive.

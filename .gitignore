@@ -8,3 +8,10 @@ build/
 tools/build/
 tools/scan_output.txt
 thirdparty/minhook/build/
+# No screenshots/game media in the repo (link external ones from the README)
+*.png
+*.bmp
+*.jpg
+*.jpeg
+*.gif
+*.mp4
