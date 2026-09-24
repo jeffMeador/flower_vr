@@ -4,6 +4,29 @@ Goal: add real stereoscopic, head-tracked VR to the 2020 PC/Steam build of
 Flower by hooking its DirectX 11 layer from outside the engine (no PhyreEngine
 source available or needed). See git log for phase-by-phase history.
 
+## Milestone 1 (tag `milestone-1`) — fully playable in VR
+
+Level 1 played end to end on a Steam Frame (SteamVR via Steam Link, RTX 5090):
+stereo, head-tracked, both eyes at 90 fps (2160² per eye, 4x MSAA), grass and
+culling follow the head, motion-controller steering (point + hold to fly),
+floating virtual screen for title/menu, level movies skipped.
+
+Settings the player landed on (see `vrmod.ini.example`): worldScale 0.3 (won a
+blind A/B vs 1.0), lens off, depth of field off, camera 1.0 back / 0.25 up.
+
+Solved along the way (see git log for details): matrix convention, culling
+(engine FOV patch + head-turned engine camera), steering feedback loop,
+±90° yaw mirroring, fisheye lens pass (and a GPU sincos precision bug in its
+"off" setting that caused the 'water' bands during head motion), hotkeys
+firing several times per press, world scale collapsing.
+
+Known issues / open:
+- Viewpoint can still dip into terrain on slopes (terrain-aware clamp in
+  progress: `src/terrain.cpp`, reads the level heightmap).
+- Level movies are black even without the mod (game/Windows video
+  playback); they're turned off via `overrides/Scripts/MovieBarn.lua`.
+- Steam build: different compile; camera patch signature found, steering site
+  not yet. Native Steam Frame (Proton/ARM) not attempted.
 ## Current state (Phase 4) — playable in VR
 
 Stereo, head-tracked, 90 fps per eye on SteamVR/OpenXR (tested on an RTX 5090,

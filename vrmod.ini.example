@@ -5,13 +5,17 @@ separation=0.0650
 shiftEyePosition=0
 lens=off
 worldScale=0.3000
+motionBlur=1
+depthOfField=0
 
 [debug]
 fakepad=1
 
 
 [xr]
+depth=0
 headCamera=1
 
-cameraBack=1.50
-cameraUp=0.00
+cameraBack=1.00
+cameraUp=0.25
+steering=motion
