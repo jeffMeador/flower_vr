@@ -988,7 +988,21 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
             ctx->ResolveSubresource(g_resolve, 0, bb, 0, desc.Format);
             src = g_resolve;
         }
-        if (renderedEye == 2)
+        // F4 (diagnostic): freeze - keep submitting the last eye images with
+        // their poses, i.e. a still, world-locked picture. Any distortion seen
+        // while moving the head then comes from reprojection/streaming, not
+        // from the game's frames.
+        static bool frozen = false;
+        if (KeyEdge(VK_F4))
+        {
+            frozen = !frozen;
+            Log("[xr] F4: frame %s", frozen ? "FROZEN (still image, world-locked)" : "live");
+        }
+        if (frozen && g_imagePoseValid[0] && g_imagePoseValid[1])
+        {
+            // keep the last images and poses
+        }
+        else if (renderedEye == 2)
         {
             // Double render: left eye in the backbuffer, right eye in its twin.
             ID3D11Resource* twin = ShadowOfResource(bb);

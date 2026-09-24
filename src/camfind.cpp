@@ -176,14 +176,15 @@ void CamFindTick(float backbufferAspect)
         return;
     }
     if (g_disarmAt) return;
-    if (KeyEdge(VK_F4))
+    bool f7 = KeyEdge(VK_F7);
+    if (f7 && (GetAsyncKeyState(VK_SHIFT) & 0x8000))
     {
-        // F4: who reads/writes the render camera matrix (x axis at node+0x90)?
+        // Shift+F7: who reads/writes the render camera matrix (x axis at node+0x90)?
         void* node = CamOverrideCameraNode();
         if (node) StartWatch((char*)node + 0x90, "camera matrix");
         return;
     }
-    if (!KeyEdge(VK_F7)) return;
+    if (!f7) return;
 
     float* cam = FindCamera(backbufferAspect);
     if (!cam) return;
