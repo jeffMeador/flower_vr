@@ -553,7 +553,15 @@ static void PollControllers(XrTime time)
         if (GetBool(g_actFlyButton, h)) fly = 1.0f;
         menu |= GetBool(g_actMenu, h);
         bool p = false;
-        GetBool(g_actToggle, h, &p); toggle |= p;
+        // Steering-mode switch needs a 1 s hold (a tap on B/Y flipped it by accident).
+        static DWORD holdStart[2] = {};
+        static bool holdFired[2] = {};
+        if (GetBool(g_actToggle, h))
+        {
+            if (!holdStart[h]) { holdStart[h] = GetTickCount(); holdFired[h] = false; }
+            if (!holdFired[h] && GetTickCount() - holdStart[h] >= 1000) { toggle = true; holdFired[h] = true; }
+        }
+        else holdStart[h] = 0;
         GetBool(g_actRecenterAim, h, &p); recenter |= p;
 
         XrSpaceLocation loc{ XR_TYPE_SPACE_LOCATION };
