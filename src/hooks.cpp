@@ -1,4 +1,5 @@
 #include "hooks.h"
+#include <MinHook.h>
 #include "log.h"
 #include "keys.h"
 #include "capture.h"
@@ -18,6 +19,13 @@ using Present_t = HRESULT(STDMETHODCALLTYPE*)(IDXGISwapChain*, UINT, UINT);
 static Present_t g_realPresent = nullptr;
 static std::atomic<uint64_t> g_frameCount{ 0 };
 static wchar_t g_dllDir[MAX_PATH] = {};
+
+bool HooksPassthrough()
+{
+    wchar_t ini[MAX_PATH];
+    swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
+    return GetPrivateProfileIntW(L"debug", L"passthrough", 0, ini) != 0;
+}
 
 void SetHooksDllDir(const wchar_t* dir)
 {
@@ -172,6 +180,13 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
 void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* device, ID3D11DeviceContext* context)
 {
     if (!swapChain) return;
+    if (HooksPassthrough())
+    {
+        MH_Initialize();
+        InstallFakePad(g_dllDir);
+        Log("[debug] passthrough: only the virtual gamepad is installed");
+        return;
+    }
     void** vtable = *reinterpret_cast<void***>(swapChain);
 
     if (!g_realPresent)

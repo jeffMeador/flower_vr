@@ -8,3 +8,7 @@ void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* device, ID
 
 // Directory the proxy DLL lives in, used for screenshot/log output paths.
 void SetHooksDllDir(const wchar_t* dir);
+
+// [debug] passthrough=1: install nothing but the virtual gamepad (for isolating
+// game problems from mod problems). Valid after SetHooksDllDir.
+bool HooksPassthrough();
