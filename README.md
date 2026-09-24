@@ -299,7 +299,7 @@ wider. Camera layout: fov +0x134, near +0x138, far +0x13C, aspect +0x140.
 
 ## License
 
-MIT (`LICENSE`), by jeffMeador with Claude (Anthropic). Third-party code and
+MIT (`LICENSE`). Written by Claude (Anthropic), directed by jeffMeador. Third-party code and
 what must not be redistributed (game files, `d3d11_orig.dll`):
 `THIRD_PARTY_NOTICES.md`. Fan mod, not affiliated with thatgamecompany or
 Annapurna Interactive.
