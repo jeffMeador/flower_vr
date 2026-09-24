@@ -544,28 +544,28 @@ static void PollControllers(XrTime time)
         Log("[xr] steering switched to %s", g_motionSteering ? "motion" : "stick");
     }
 
-    // Motion steering: the right hand (left if the right isn't tracked).
-    // Only in a 3D level: the menu expects no stick input to settle on a pot.
-    // "Straight" is re-captured whenever a level starts (and on thumbstick
-    // click), from however the controller is held at that moment - capturing
-    // it once at startup pinned the stick at full-up if the controller was
-    // lying down then. The thumbstick overrides whenever it's pushed.
+    // Motion steering: the right hand (left if the right isn't tracked), only
+    // in a 3D level (the menu expects no stick input to settle on a pot).
+    // Pressing a fly button sets "straight" to wherever the controller points
+    // at that moment, and pointing steers while it's held - like the grip
+    // version, on the fly buttons. Thumbstick click re-centers mid-hold; a
+    // pushed thumbstick overrides motion.
     static bool neutralSet[2] = {};
     static XrQuaternionf neutral[2];
-    static bool wasInLevel = false;
+    static bool wasFlying = false;
     bool inLevel = StereoProjectionFresh();
-    if (inLevel && !wasInLevel) { neutralSet[0] = neutralSet[1] = false; }
-    wasInLevel = inLevel;
+    bool flying = fly > 0.5f;
+    if (flying && !wasFlying) { neutralSet[0] = neutralSet[1] = false; }
+    wasFlying = flying;
 
     float lx = stickX, ly = stickY;
     int h = aimOk[1] ? 1 : aimOk[0] ? 0 : -1;
-    if (h >= 0 && inLevel)
+    if (h >= 0 && inLevel && flying)
     {
         if (recenter || !neutralSet[h])
         {
             neutral[h] = aim[h].orientation;
             neutralSet[h] = true;
-            Log("[xr] motion steering re-centered on %s hand", h ? "right" : "left");
         }
         bool stickPushed = stickX * stickX + stickY * stickY > 0.25f * 0.25f;
         if (g_motionSteering && !stickPushed)
@@ -735,6 +735,35 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
     XrFrameBeginInfo fbi{ XR_TYPE_FRAME_BEGIN_INFO };
     if (XR_FAILED(xrBeginFrame_(g_session, &fbi))) return;
     PollControllers(fs.predictedDisplayTime);
+
+    // Frame pacing: a frame is "late" if more than 1.5 display periods passed
+    // since the previous one (SteamVR then reprojects/motion-smooths, which can
+    // look like wobbly 'water' distortion).
+    {
+        static LARGE_INTEGER freq = {}, last = {};
+        static int frames = 0, late = 0;
+        static double worstMs = 0, sumMs = 0;
+        static DWORD lastLog = 0;
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+        if (last.QuadPart)
+        {
+            double ms = (now.QuadPart - last.QuadPart) * 1000.0 / freq.QuadPart;
+            double periodMs = fs.predictedDisplayPeriod / 1e6;
+            frames++; sumMs += ms;
+            if (ms > worstMs) worstMs = ms;
+            if (periodMs > 0 && ms > 1.5 * periodMs) late++;
+        }
+        last = now;
+        if (GetTickCount() - lastLog > 5000 && frames)
+        {
+            lastLog = GetTickCount();
+            Log("[xr] pacing: %d frames, avg %.2f ms, worst %.2f ms, late %d (%.1f%%), display period %.2f ms",
+                frames, sumMs / frames, worstMs, late, 100.0 * late / frames, fs.predictedDisplayPeriod / 1e6);
+            frames = late = 0; worstMs = sumMs = 0;
+        }
+    }
 
     XrCompositionLayerProjectionView projViews[2] = { { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW }, { XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW } };
     XrCompositionLayerProjection layer{ XR_TYPE_COMPOSITION_LAYER_PROJECTION };
