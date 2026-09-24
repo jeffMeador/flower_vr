@@ -2,6 +2,7 @@
 #include "log.h"
 #include "keys.h"
 #include "stereo.h"
+#include "terrain.h"
 #include <Windows.h>
 #include <cstring>
 #include <cstdint>
@@ -41,6 +42,7 @@ static Ctl* g_ctl = nullptr;
 static float g_wantFov = 125.0f;
 static bool g_installed = false;
 static bool g_headCamera = false; // [xr] headCamera: turn engine camera with the head
+static bool g_terrainClamp = false; // [xr] terrainClamp: keep the viewpoint above ground (experimental)
 
 // Gameplay must keep seeing the un-turned camera: the steering code converts
 // stick input to a world direction with it (Flower.exe+0x10B30F..0x10B32B,
@@ -132,6 +134,7 @@ static void OnCameraUpdate(uint8_t* node, uint8_t* wrapper)
     if (!g_ctl || !g_ctl->enabled || !g_headCamera || !node) { StereoHeadNotApplied(); return; }
 
     float* m = (float*)(node + 0x90);
+    TerrainObserveCamera(m[12], m[13], m[14]); // game camera: learns heightmap alignment
     float R[9], t[3];
     if (!StereoTakeHeadForCamera(m, R, t)) return;
     EnsureSteerBreakpoints();
@@ -145,6 +148,23 @@ static void OnCameraUpdate(uint8_t* node, uint8_t* wrapper)
             m[j * 4 + k] = e[0][k] * R[0 * 3 + j] + e[1][k] * R[1 * 3 + j] + e[2][k] * R[2 * 3 + j];
     for (int k = 0; k < 3; ++k)
         m[12 + k] = pos[k] + e[0][k] * t[0] + e[1][k] * t[1] + e[2][k] * t[2];
+
+    // Terrain clamp: the VR viewpoint sits behind/above the game camera (and
+    // moves with the head), so it can end up inside a slope the game camera
+    // itself avoids. Lift it to stay above the ground.
+    // Experimental: [xr] terrainClamp=1 (off by default until verified in-headset).
+    float ground;
+    const float kMargin = 0.5f; // game units above the terrain surface
+    if (g_terrainClamp && TerrainHeight(m[12], m[14], ground) && m[13] < ground + kMargin)
+    {
+        static DWORD lastLog = 0;
+        if (GetTickCount() - lastLog > 2000)
+        {
+            lastLog = GetTickCount();
+            Log("[terrain] viewpoint lifted %.2f units out of the ground", ground + kMargin - m[13]);
+        }
+        m[13] = ground + kMargin;
+    }
     memcpy(g_headMatrix, m, 64);
     g_camMatrix = m;
 
@@ -162,6 +182,8 @@ static void Emit64(uint8_t*& p, uint64_t v) { memcpy(p, &v, 8); p += 8; }
 void* CamOverrideCameraNode() { return g_ctl ? g_ctl->camera : nullptr; }
 
 void CamOverrideSetHeadCamera(bool on) { g_headCamera = on; }
+
+void CamOverrideSetTerrainClamp(bool on) { g_terrainClamp = on; }
 
 bool CamOverrideInstall(float fovDegrees)
 {

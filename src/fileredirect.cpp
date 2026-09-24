@@ -1,5 +1,6 @@
 #include "fileredirect.h"
 #include "log.h"
+#include "terrain.h"
 #include <MinHook.h>
 #include <cwchar>
 #include <cwctype>
@@ -53,6 +54,7 @@ static HANDLE Redirected(const wchar_t* name, DWORD access, DWORD share, LPSECUR
 {
     *handled = false;
     if (!name) return INVALID_HANDLE_VALUE;
+    TerrainNotifyFileOpened(name); // remembers the level's heightmap
     if (!g_cfgTarget.empty() && EndsWithI(name, L"\\Flower\\Flower.cfg"))
     {
         if (!g_loggedCfg) { g_loggedCfg = true; Log("[redirect] %ls -> %ls", name, g_cfgTarget.c_str()); }

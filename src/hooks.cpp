@@ -209,5 +209,6 @@ void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* device, ID
         GetPrivateProfileStringW(L"xr", L"gameFov", L"125", buf, 32, ini);
         CamOverrideInstall((float)_wtof(buf));
         CamOverrideSetHeadCamera(GetPrivateProfileIntW(L"xr", L"headCamera", 0, ini) != 0);
+        CamOverrideSetTerrainClamp(GetPrivateProfileIntW(L"xr", L"terrainClamp", 0, ini) != 0);
     }
 }

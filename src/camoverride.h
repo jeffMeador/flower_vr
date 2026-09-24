@@ -12,3 +12,6 @@ void* CamOverrideCameraNode();
 
 // Turn the engine camera by the head pose (culling follows gaze).
 void CamOverrideSetHeadCamera(bool on);
+
+// Keep the VR viewpoint above the level's terrain (experimental, off by default).
+void CamOverrideSetTerrainClamp(bool on);
