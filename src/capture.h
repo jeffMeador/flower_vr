@@ -10,3 +10,7 @@ void InstallCaptureHooks(ID3D11Device* device, ID3D11DeviceContext* context);
 
 // Call once per Present to drive the periodic logging budget.
 void NotifyCaptureFrameBoundary();
+
+// Scene depth buffer of the last frame's 3D draws (left eye; the right eye's
+// is its shadow twin). AddRef'd, may be null.
+ID3D11Resource* CaptureSceneDepth();

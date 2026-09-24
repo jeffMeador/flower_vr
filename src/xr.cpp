@@ -9,7 +9,10 @@
 #include <vector>
 #include <initializer_list>
 #include <Xinput.h>
+#include <d3d11_1.h>
+#include <d3dcompiler.h>
 #include "fakepad.h"
+#include "capture.h"
 
 #define XR_USE_PLATFORM_WIN32
 #define XR_USE_GRAPHICS_API_D3D11
@@ -49,6 +52,7 @@ static XrSpace g_viewSpace = XR_NULL_HANDLE;
 static XrSpace g_localSpace = XR_NULL_HANDLE;
 static XrFovf g_eyeFov[2] = {};
 static bool g_recenterPending = false;
+static bool g_depthExt = false;       // XR_KHR_composition_layer_depth enabled on the instance
 // Comfort: in VR the viewpoint sits behind/above the game camera so the lead
 // petal isn't right between the eyes (meters, reference frame; saved to ini).
 static float g_camBack = 1.0f, g_camUp = 0.25f;
@@ -120,12 +124,29 @@ static bool CreateInstance()
     PFN_xrCreateInstance xrCreateInstance_ = nullptr;
     xrGetInstanceProcAddr_(XR_NULL_HANDLE, "xrCreateInstance", (PFN_xrVoidFunction*)&xrCreateInstance_);
 
-    const char* exts[] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME };
+    // Depth layers if the runtime offers them.
+    PFN_xrEnumerateInstanceExtensionProperties enumExt = nullptr;
+    xrGetInstanceProcAddr_(XR_NULL_HANDLE, "xrEnumerateInstanceExtensionProperties", (PFN_xrVoidFunction*)&enumExt);
+    g_depthExt = false;
+    if (enumExt)
+    {
+        uint32_t n = 0;
+        enumExt(nullptr, 0, &n, nullptr);
+        std::vector<XrExtensionProperties> props(n, { XR_TYPE_EXTENSION_PROPERTIES });
+        enumExt(nullptr, n, &n, props.data());
+        for (auto& p : props)
+            if (!strcmp(p.extensionName, XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME)) g_depthExt = true;
+    }
+    wchar_t depthIni[8];
+    GetPrivateProfileStringW(L"xr", L"depth", L"1", depthIni, 8, g_iniPath);
+    if (depthIni[0] == L'0') g_depthExt = false;
+
+    const char* exts[] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME, XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME };
     XrInstanceCreateInfo ci{ XR_TYPE_INSTANCE_CREATE_INFO };
     strcpy_s(ci.applicationInfo.applicationName, "Flower VRMod");
     strcpy_s(ci.applicationInfo.engineName, "PhyreEngine (injected)");
     ci.applicationInfo.apiVersion = XR_API_VERSION_1_0;
-    ci.enabledExtensionCount = 1;
+    ci.enabledExtensionCount = g_depthExt ? 2 : 1;
     ci.enabledExtensionNames = exts;
     XrResult r = xrCreateInstance_(&ci, &g_instance);
     if (XR_FAILED(r))
@@ -172,6 +193,7 @@ static DXGI_FORMAT SrgbOf(DXGI_FORMAT f)
 }
 
 static bool CreateInput(); // motion controllers, below
+static bool CreateDepthResources(const std::vector<int64_t>& formats); // depth layers, below
 
 static bool CreateSession(IDXGISwapChain* gameSwapChain)
 {
@@ -257,6 +279,9 @@ static bool CreateSession(IDXGISwapChain* gameSwapChain)
         XR_CHECK(xrEnumerateSwapchainImages_(g_eyes[e].handle, count, &count, (XrSwapchainImageBaseHeader*)imgs.data()));
         for (auto& i : imgs) g_eyes[e].images.push_back(i.texture);
     }
+
+    if (g_depthExt && Stereo().doubleRender && !CreateDepthResources(formats))
+        Log("[xr] depth submission unavailable (continuing without it)");
 
     if (bbDesc.SampleDesc.Count > 1)
     {
@@ -647,6 +672,169 @@ static void Recenter(const XrPosef& head)
         head.position.x, head.position.y, head.position.z);
 }
 
+// ---- depth for the compositor (XR_KHR_composition_layer_depth) ----
+// The runtime reprojects each frame to the newest head pose; without depth it
+// has to guess distances, which showed as wobbly 'water' patches while the
+// head moved. Each eye's scene depth (the game's 4x MSAA D24S8 buffer, or its
+// shadow twin for the right eye) is copied - sample 0 - into a D32 depth
+// swapchain by a fullscreen pass that runs in its own device-context state,
+// so the game's pipeline state is untouched.
+static bool g_depthReady = false;     // swapchains + shaders created
+static EyeSwapchain g_depthSc[2];
+static std::vector<ID3D11DepthStencilView*> g_depthDsv[2];
+static ID3D11VertexShader* g_fsVS = nullptr;
+static ID3D11PixelShader* g_depthPSms = nullptr;
+static ID3D11PixelShader* g_depthPS1 = nullptr;
+static ID3D11DepthStencilState* g_dssWrite = nullptr;
+static ID3D11RasterizerState* g_rsNoCull = nullptr;
+static ID3DDeviceContextState* g_ownState = nullptr;
+static bool g_depthWritten[2] = {};
+
+static const char* kFullscreenVS =
+    "float4 main(uint id : SV_VertexID) : SV_Position {"
+    "  float2 uv = float2((id << 1) & 2, id & 2);"
+    "  return float4(uv * float2(2, -2) + float2(-1, 1), 0, 1); }";
+static const char* kDepthPSms =
+    "Texture2DMS<float> d : register(t0);"
+    "float main(float4 p : SV_Position) : SV_Depth { return d.Load(int2(p.xy), 0); }";
+static const char* kDepthPS1 =
+    "Texture2D<float> d : register(t0);"
+    "float main(float4 p : SV_Position) : SV_Depth { return d.Load(int3(p.xy, 0)); }";
+
+static ID3DBlob* CompileHlsl(const char* src, const char* target)
+{
+    ID3DBlob* code = nullptr;
+    ID3DBlob* errors = nullptr;
+    HRESULT hr = D3DCompile(src, strlen(src), nullptr, nullptr, nullptr, "main", target, 0, 0, &code, &errors);
+    if (FAILED(hr)) Log("[xr] shader compile failed: %s", errors ? (const char*)errors->GetBufferPointer() : "?");
+    if (errors) errors->Release();
+    return SUCCEEDED(hr) ? code : nullptr;
+}
+
+static bool CreateDepthResources(const std::vector<int64_t>& formats)
+{
+    DXGI_FORMAT fmt = DXGI_FORMAT_UNKNOWN;
+    for (int64_t f : formats) if (f == DXGI_FORMAT_D32_FLOAT) fmt = DXGI_FORMAT_D32_FLOAT;
+    if (fmt == DXGI_FORMAT_UNKNOWN)
+        for (int64_t f : formats) if (f == DXGI_FORMAT_D24_UNORM_S8_UINT) fmt = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    if (fmt == DXGI_FORMAT_UNKNOWN) { Log("[xr] depth: no depth swapchain format offered"); return false; }
+
+    for (int e = 0; e < 2; ++e)
+    {
+        XrSwapchainCreateInfo sc{ XR_TYPE_SWAPCHAIN_CREATE_INFO };
+        sc.usageFlags = XR_SWAPCHAIN_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        sc.format = fmt;
+        sc.sampleCount = 1;
+        sc.width = g_size; sc.height = g_size;
+        sc.faceCount = 1; sc.arraySize = 1; sc.mipCount = 1;
+        XR_CHECK(xrCreateSwapchain_(g_session, &sc, &g_depthSc[e].handle));
+        uint32_t count = 0;
+        XR_CHECK(xrEnumerateSwapchainImages_(g_depthSc[e].handle, 0, &count, nullptr));
+        std::vector<XrSwapchainImageD3D11KHR> imgs(count, { XR_TYPE_SWAPCHAIN_IMAGE_D3D11_KHR });
+        XR_CHECK(xrEnumerateSwapchainImages_(g_depthSc[e].handle, count, &count, (XrSwapchainImageBaseHeader*)imgs.data()));
+        for (auto& i : imgs)
+        {
+            g_depthSc[e].images.push_back(i.texture);
+            D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
+            dd.Format = fmt;
+            dd.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D;
+            ID3D11DepthStencilView* dsv = nullptr;
+            g_device->CreateDepthStencilView(i.texture, &dd, &dsv);
+            g_depthDsv[e].push_back(dsv);
+        }
+    }
+
+    ID3DBlob* vs = CompileHlsl(kFullscreenVS, "vs_5_0");
+    ID3DBlob* psms = CompileHlsl(kDepthPSms, "ps_5_0");
+    ID3DBlob* ps1 = CompileHlsl(kDepthPS1, "ps_5_0");
+    if (!vs || !psms || !ps1) return false;
+    g_device->CreateVertexShader(vs->GetBufferPointer(), vs->GetBufferSize(), nullptr, &g_fsVS);
+    g_device->CreatePixelShader(psms->GetBufferPointer(), psms->GetBufferSize(), nullptr, &g_depthPSms);
+    g_device->CreatePixelShader(ps1->GetBufferPointer(), ps1->GetBufferSize(), nullptr, &g_depthPS1);
+    vs->Release(); psms->Release(); ps1->Release();
+
+    D3D11_DEPTH_STENCIL_DESC ds = {};
+    ds.DepthEnable = TRUE;
+    ds.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+    ds.DepthFunc = D3D11_COMPARISON_ALWAYS;
+    g_device->CreateDepthStencilState(&ds, &g_dssWrite);
+    D3D11_RASTERIZER_DESC rs = {};
+    rs.FillMode = D3D11_FILL_SOLID;
+    rs.CullMode = D3D11_CULL_NONE;
+    rs.DepthClipEnable = TRUE;
+    g_device->CreateRasterizerState(&rs, &g_rsNoCull);
+
+    ID3D11Device1* dev1 = nullptr;
+    if (FAILED(g_device->QueryInterface(__uuidof(ID3D11Device1), (void**)&dev1))) { Log("[xr] depth: no ID3D11Device1"); return false; }
+    D3D_FEATURE_LEVEL fl = g_device->GetFeatureLevel();
+    HRESULT hr = dev1->CreateDeviceContextState(0, &fl, 1, D3D11_SDK_VERSION, __uuidof(ID3D11Device), nullptr, &g_ownState);
+    dev1->Release();
+    if (FAILED(hr)) { Log("[xr] depth: CreateDeviceContextState failed 0x%08X", (unsigned)hr); return false; }
+
+    g_depthReady = g_fsVS && g_depthPSms && g_depthPS1 && g_dssWrite && g_rsNoCull;
+    Log("[xr] depth submission %s (format %d)", g_depthReady ? "ready" : "FAILED", (int)fmt);
+    return g_depthReady;
+}
+
+// Copy one eye's scene depth into its depth swapchain.
+static void WriteDepth(int e, ID3D11DeviceContext* ctx, ID3D11Resource* depth)
+{
+    g_depthWritten[e] = false;
+    if (!g_depthReady || !depth) return;
+    D3D11_TEXTURE2D_DESC td = {};
+    static_cast<ID3D11Texture2D*>(depth)->GetDesc(&td);
+    if (td.Width != g_size || td.Height != g_size || td.Format != DXGI_FORMAT_R24G8_TYPELESS || !(td.BindFlags & D3D11_BIND_SHADER_RESOURCE))
+    {
+        static bool logged = false;
+        if (!logged) { logged = true; Log("[xr] depth: unsupported scene depth %ux%u fmt %d bind 0x%X", td.Width, td.Height, (int)td.Format, td.BindFlags); }
+        return;
+    }
+
+    D3D11_SHADER_RESOURCE_VIEW_DESC sd = {};
+    sd.Format = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+    bool ms = td.SampleDesc.Count > 1;
+    sd.ViewDimension = ms ? D3D11_SRV_DIMENSION_TEXTURE2DMS : D3D11_SRV_DIMENSION_TEXTURE2D;
+    if (!ms) sd.Texture2D.MipLevels = 1;
+    ID3D11ShaderResourceView* srv = nullptr;
+    if (FAILED(g_device->CreateShaderResourceView(depth, &sd, &srv)) || !srv) return;
+
+    uint32_t idx = 0;
+    XrSwapchainImageAcquireInfo ai{ XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO };
+    if (XR_FAILED(xrAcquireSwapchainImage_(g_depthSc[e].handle, &ai, &idx))) { srv->Release(); return; }
+    XrSwapchainImageWaitInfo wi{ XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO };
+    wi.timeout = XR_INFINITE_DURATION;
+    xrWaitSwapchainImage_(g_depthSc[e].handle, &wi);
+
+    ID3D11DeviceContext1* ctx1 = nullptr;
+    if (SUCCEEDED(ctx->QueryInterface(__uuidof(ID3D11DeviceContext1), (void**)&ctx1)))
+    {
+        ID3DDeviceContextState* gameState = nullptr;
+        ctx1->SwapDeviceContextState(g_ownState, &gameState);
+        D3D11_VIEWPORT vp = { 0, 0, (float)g_size, (float)g_size, 0, 1 };
+        ctx1->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx1->IASetInputLayout(nullptr);
+        ctx1->VSSetShader(g_fsVS, nullptr, 0);
+        ctx1->PSSetShader(ms ? g_depthPSms : g_depthPS1, nullptr, 0);
+        ctx1->PSSetShaderResources(0, 1, &srv);
+        ctx1->OMSetRenderTargets(0, nullptr, g_depthDsv[e][idx]);
+        ctx1->OMSetDepthStencilState(g_dssWrite, 0);
+        ctx1->RSSetState(g_rsNoCull);
+        ctx1->RSSetViewports(1, &vp);
+        ctx1->Draw(3, 0);
+        ID3D11ShaderResourceView* none = nullptr;
+        ctx1->PSSetShaderResources(0, 1, &none);
+        ctx1->OMSetRenderTargets(0, nullptr, nullptr);
+        ctx1->SwapDeviceContextState(gameState, nullptr);
+        if (gameState) gameState->Release();
+        ctx1->Release();
+        g_depthWritten[e] = true;
+    }
+    srv->Release();
+
+    XrSwapchainImageReleaseInfo ri{ XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO };
+    xrReleaseSwapchainImage_(g_depthSc[e].handle, &ri);
+}
+
 // ---- virtual screen for menus / title / videos ----
 // When the game shows no 3D camera, its whole image goes onto a quad floating
 // in front of the (recentered) user.
@@ -771,6 +959,7 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
     uint32_t layerCount = 0;
 
     XrCompositionLayerQuad screenLayer{ XR_TYPE_COMPOSITION_LAYER_QUAD };
+    XrCompositionLayerDepthInfoKHR depthInfo[2] = { { XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR }, { XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR } };
     float xs, ys;
     // Full VR while the game shows a 3D camera; otherwise (title, menu, intro
     // video) show its image on a floating virtual screen.
@@ -803,6 +992,15 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
             }
             CopyToEye(0, ctx, src, desc);
             if (twinSrc) CopyToEye(1, ctx, twinSrc, desc);
+            if (g_depthReady)
+            {
+                ID3D11Resource* depthL = CaptureSceneDepth();
+                ID3D11Resource* depthR = depthL ? ShadowOfResource(depthL) : nullptr;
+                WriteDepth(0, ctx, depthL);
+                WriteDepth(1, ctx, depthR);
+                if (depthR) depthR->Release();
+                if (depthL) depthL->Release();
+            }
             if (twin) twin->Release();
             if (g_givenValid && twinSrc)
             {
@@ -909,6 +1107,23 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
             {
                 projViews[e].pose = g_imagePose[e];
                 projViews[e].fov = g_eyeFov[e];
+                // Depth (game units -> meters: divide by worldScale).
+                float nearU, farU;
+                if (g_depthReady && g_depthWritten[0] && g_depthWritten[1] && StereoDepthRange(nearU, farU))
+                {
+                    float ws = Stereo().worldScale > 1e-4f ? Stereo().worldScale : 1e-4f;
+                    depthInfo[e] = { XR_TYPE_COMPOSITION_LAYER_DEPTH_INFO_KHR };
+                    depthInfo[e].subImage.swapchain = g_depthSc[e].handle;
+                    depthInfo[e].subImage.imageRect.offset = { 0, 0 };
+                    depthInfo[e].subImage.imageRect.extent = { (int32_t)g_size, (int32_t)g_size };
+                    depthInfo[e].minDepth = 0.0f;
+                    depthInfo[e].maxDepth = 1.0f;
+                    depthInfo[e].nearZ = nearU / ws;
+                    depthInfo[e].farZ = farU / ws;
+                    projViews[e].next = &depthInfo[e];
+                    static bool logged = false;
+                    if (!logged) { logged = true; Log("[xr] submitting depth: near %.3f m, far %.1f m", depthInfo[e].nearZ, depthInfo[e].farZ); }
+                }
                 projViews[e].subImage.swapchain = g_eyes[e].handle;
                 projViews[e].subImage.imageRect.offset = { 0, 0 };
                 projViews[e].subImage.imageRect.extent = { (int32_t)g_size, (int32_t)g_size };

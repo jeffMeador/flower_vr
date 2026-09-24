@@ -53,6 +53,9 @@ void StereoObserveViewProj(const Mat4& viewProj);
 // title screens and videos).
 bool StereoProjectionFresh();
 
+// Near/far plane of the game camera's depth mapping, in game units.
+bool StereoDepthRange(float& nearUnits, float& farUnits);
+
 // Projection scales of the game camera (P[0][0], P[1][1]); false until seen.
 bool StereoProjection(float& xs, float& ys);
 

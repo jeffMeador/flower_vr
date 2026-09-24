@@ -198,6 +198,15 @@ bool StereoProjectionFresh()
     return g_projKnown && g_frame - g_projFrame < 10;
 }
 
+bool StereoDepthRange(float& nearUnits, float& farUnits)
+{
+    // Game projection depth row: z_ndc = A + B/d (D3D, 0 = near, 1 = far).
+    if (!g_projKnown || fabsf(g_A) < 1e-6f || fabsf(1.0f - g_A) < 1e-9f) return false;
+    nearUnits = -g_B / g_A;
+    farUnits = g_B / (1.0f - g_A);
+    return nearUnits > 0 && farUnits > nearUnits;
+}
+
 bool StereoProjection(float& xs, float& ys)
 {
     xs = g_xs; ys = g_ys;

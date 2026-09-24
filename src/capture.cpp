@@ -73,6 +73,14 @@ static std::unordered_map<ID3D11PixelShader*, PixelDof> g_psDof;
 static std::unordered_map<ID3D11DeviceContext*, ContextState> g_contextState;
 
 static std::atomic<uint64_t> g_captureFrame{ 0 };
+static ID3D11Resource* g_sceneDepth = nullptr;   // AddRef'd
+static uint64_t g_sceneDepthFrame = ~0ull;
+
+ID3D11Resource* CaptureSceneDepth()
+{
+    if (g_sceneDepth) g_sceneDepth->AddRef();
+    return g_sceneDepth;
+}
 static int g_logBudget = 0;
 static bool g_vpObservedThisFrame = false;
 
@@ -214,14 +222,14 @@ static HRESULT STDMETHODCALLTYPE Hook_CreateVertexShader(ID3D11Device* self, con
 static void STDMETHODCALLTYPE Hook_VSSetShader(ID3D11DeviceContext* self, ID3D11VertexShader* shader, ID3D11ClassInstance* const* instances, UINT numInstances)
 {
     g_countVSSetShader++;
-    g_contextState[self].currentVS = shader;
+    if (!ShadowBypassed()) g_contextState[self].currentVS = shader; // not our own XR-time draws
     g_realVSSetShader(self, shader, instances, numInstances);
 }
 
 static void STDMETHODCALLTYPE Hook_VSSetConstantBuffers(ID3D11DeviceContext* self, UINT startSlot, UINT numBuffers, ID3D11Buffer* const* buffers)
 {
     g_countVSSetCB++;
-    if (startSlot <= 0 && 0 < startSlot + numBuffers && buffers)
+    if (startSlot <= 0 && 0 < startSlot + numBuffers && buffers && !ShadowBypassed())
         g_contextState[self].currentSlot0CB = buffers[0 - startSlot];
     g_realVSSetConstantBuffers(self, startSlot, numBuffers, buffers);
 }
@@ -266,14 +274,14 @@ static HRESULT STDMETHODCALLTYPE Hook_CreatePixelShader(ID3D11Device* self, cons
 
 static void STDMETHODCALLTYPE Hook_PSSetShader(ID3D11DeviceContext* self, ID3D11PixelShader* shader, ID3D11ClassInstance* const* inst, UINT n)
 {
-    g_contextState[self].currentPS = shader;
+    if (!ShadowBypassed()) g_contextState[self].currentPS = shader;
     g_realPSSetShader(self, shader, inst, n);
 }
 
 static void STDMETHODCALLTYPE Hook_PSSetConstantBuffers(ID3D11DeviceContext* self, UINT start, UINT n, ID3D11Buffer* const* buffers)
 {
     ContextState& st = g_contextState[self];
-    for (UINT i = 0; i < n && buffers; ++i)
+    for (UINT i = 0; i < n && buffers && !ShadowBypassed(); ++i)
         if (start + i < 4) st.psCB[start + i] = buffers[i];
     g_realPSSetConstantBuffers(self, start, n, buffers);
 }
@@ -475,6 +483,54 @@ static void PrepareDraw(ID3D11DeviceContext* self)
                 any = true;
                 break;
             }
+            }
+        }
+    }
+
+    // Scene depth for the headset: the depth buffer of the frame's first 3D
+    // draw (left eye; the right eye's is its twin).
+    if (any && off.hasMVP && g_sceneDepthFrame != g_captureFrame.load())
+    {
+        ID3D11DepthStencilView* dsv = nullptr;
+        self->OMGetRenderTargets(0, nullptr, &dsv);
+        if (dsv)
+        {
+            ID3D11Resource* res = nullptr;
+            dsv->GetResource(&res);
+            if (g_sceneDepth) g_sceneDepth->Release();
+            g_sceneDepth = res; // keeps the reference from GetResource
+            dsv->Release();
+            g_sceneDepthFrame = g_captureFrame.load();
+        }
+    }
+
+    // One-time diagnostics: which depth buffers do 3D draws use?
+    if (any && off.hasMVP)
+    {
+        static int logged = 0;
+        static ID3D11Resource* seen[4] = {};
+        if (logged < 4)
+        {
+            ID3D11DepthStencilView* dsv = nullptr;
+            self->OMGetRenderTargets(0, nullptr, &dsv);
+            if (dsv)
+            {
+                ID3D11Resource* res = nullptr;
+                dsv->GetResource(&res);
+                bool known = false;
+                for (int i = 0; i < logged; ++i) known |= seen[i] == res;
+                if (!known && res)
+                {
+                    seen[logged++] = res;
+                    D3D11_TEXTURE2D_DESC td = {};
+                    static_cast<ID3D11Texture2D*>(res)->GetDesc(&td);
+                    D3D11_DEPTH_STENCIL_VIEW_DESC dd = {};
+                    dsv->GetDesc(&dd);
+                    Log("[capture] 3D draws use depth buffer %p: %ux%u fmt %d (view fmt %d) samples %u bind 0x%X",
+                        res, td.Width, td.Height, (int)td.Format, (int)dd.Format, td.SampleDesc.Count, td.BindFlags);
+                }
+                if (res) res->Release();
+                dsv->Release();
             }
         }
     }
