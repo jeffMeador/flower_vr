@@ -7,6 +7,7 @@
 #include <cstring>
 #include <cstdint>
 #include <initializer_list>
+#include <vector>
 
 // Overrides the engine camera's FOV/aspect so its frustum (and therefore its
 // CPU culling) covers the headset's view. Found with camfind (F7):
@@ -21,7 +22,6 @@
 // the ucomiss and jumps back to the je. Camera layout: fov +0x134, near
 // +0x138, far +0x13C, aspect +0x140.
 
-static const uintptr_t kPatchRva = 0x3F5DE;
 static const uint8_t kExpected[16] = {
     0x48, 0x8B, 0x4B, 0x28,                    // mov rcx,[rbx+28h]
     0xF3, 0x0F, 0x10, 0x43, 0x60,              // movss xmm0,[rbx+60h]
@@ -50,10 +50,49 @@ static bool g_terrainClamp = false; // [xr] terrainClamp: keep the viewpoint abo
 // the head reversed the controls and fed back into the chase camera (spin).
 // Two hardware execute breakpoints on the game thread swap the original
 // matrix in for exactly those four loads and the head-turned one back after.
-static const uintptr_t kSteerStartRva = 0x10B30F; // movups xmm6,[rcx+90h]
-static const uintptr_t kSteerEndRva = 0x10B32B;   // lea rcx,[rsp+70h]
-static const uint8_t kSteerStartBytes[7] = { 0x0F, 0x10, 0xB1, 0x90, 0x00, 0x00, 0x00 };
-static const uint8_t kSteerEndBytes[5] = { 0x48, 0x8D, 0x4C, 0x24, 0x70 };
+// Patch sites are found by byte pattern (-1 = any byte), so one DLL works on
+// the GOG and Steam builds (different compiles, different addresses).
+struct SteerSignature
+{
+    const char* build;
+    std::vector<int> bytes;
+    int startOffset; // first matrix load (swap in the original camera)
+    int endOffset;   // first instruction after the loads (swap the head camera back)
+};
+static const std::vector<SteerSignature> kSteerSigs = {
+    // GOG: movups xmm6,[rcx+90h] / xmm3,[rcx+A0h] / xmm5,[rcx+B0h] / xmm7,[rcx+C0h]; lea rcx,[rsp+70h]
+    { "GOG", { 0x0F, 0x10, 0xB1, 0x90, 0x00, 0x00, 0x00, 0x0F, 0x10, 0x99, 0xA0, 0x00, 0x00, 0x00,
+               0x0F, 0x10, 0xA9, 0xB0, 0x00, 0x00, 0x00, 0x0F, 0x10, 0xB9, 0xC0, 0x00, 0x00, 0x00,
+               0x48, 0x8D, 0x4C, 0x24, 0x70 }, 0, 28 },
+};
+static uint8_t* g_steerStart = nullptr;
+static uint8_t* g_steerEnd = nullptr;
+
+// Unique match of a pattern in the exe's code, or null (logs the match count).
+static uint8_t* FindInExe(const std::vector<int>& pat, const char* what)
+{
+    uint8_t* base = (uint8_t*)GetModuleHandleW(nullptr);
+    auto* dos = (IMAGE_DOS_HEADER*)base;
+    auto* nt = (IMAGE_NT_HEADERS*)(base + dos->e_lfanew);
+    auto* sec = IMAGE_FIRST_SECTION(nt);
+    uint8_t* found = nullptr;
+    int count = 0;
+    for (int s = 0; s < nt->FileHeader.NumberOfSections; ++s, ++sec)
+    {
+        if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        uint8_t* p = base + sec->VirtualAddress;
+        size_t n = sec->Misc.VirtualSize;
+        for (size_t i = 0; i + pat.size() <= n; ++i)
+        {
+            size_t j = 0;
+            for (; j < pat.size(); ++j) if (pat[j] >= 0 && p[i + j] != (uint8_t)pat[j]) break;
+            if (j == pat.size()) { if (!found) found = p + i; ++count; }
+        }
+    }
+    if (count != 1)
+        Log("[camoverride] %s: pattern matched %d times (need exactly 1)", what, count);
+    return count == 1 ? found : nullptr;
+}
 
 static float* g_camMatrix = nullptr;       // node+0x90 of the camera we turned
 static float g_origMatrix[16], g_headMatrix[16];
@@ -77,7 +116,6 @@ static LONG WINAPI SteerBreakpointHandler(EXCEPTION_POINTERS* info)
 static DWORD WINAPI ArmSteerBreakpoints(LPVOID threadIdPtr)
 {
     DWORD tid = (DWORD)(uintptr_t)threadIdPtr;
-    uint8_t* base = (uint8_t*)GetModuleHandleW(nullptr);
     HANDLE h = OpenThread(THREAD_GET_CONTEXT | THREAD_SET_CONTEXT | THREAD_SUSPEND_RESUME, FALSE, tid);
     if (!h) return 0;
     if (SuspendThread(h) != (DWORD)-1)
@@ -86,8 +124,8 @@ static DWORD WINAPI ArmSteerBreakpoints(LPVOID threadIdPtr)
         c.ContextFlags = CONTEXT_DEBUG_REGISTERS;
         if (GetThreadContext(h, &c))
         {
-            c.Dr1 = (DWORD64)(base + kSteerStartRva);
-            c.Dr2 = (DWORD64)(base + kSteerEndRva);
+            c.Dr1 = (DWORD64)g_steerStart;
+            c.Dr2 = (DWORD64)g_steerEnd;
             c.Dr7 &= ~((DWORD64)0xFF << 20);    // RW1/LEN1/RW2/LEN2 = 0: execute, 1 byte
             c.Dr7 |= (1ull << 2) | (1ull << 4); // L1, L2
             SetThreadContext(h, &c);
@@ -99,18 +137,29 @@ static DWORD WINAPI ArmSteerBreakpoints(LPVOID threadIdPtr)
     return 0;
 }
 
+// Find this build's steering code (at startup, so it's logged even without a headset).
+static void LocateSteering()
+{
+    uint8_t* base = (uint8_t*)GetModuleHandleW(nullptr);
+    for (const SteerSignature& sig : kSteerSigs)
+    {
+        if (uint8_t* p = FindInExe(sig.bytes, sig.build))
+        {
+            g_steerStart = p + sig.startOffset;
+            g_steerEnd = p + sig.endOffset;
+            Log("[camoverride] steering code found (%s build) at Flower.exe+0x%llX", sig.build,
+                (unsigned long long)(g_steerStart - base));
+            return;
+        }
+    }
+    Log("[camoverride] steering code not found (unknown build); head camera stays off (it would reverse the controls)");
+}
+
 static void EnsureSteerBreakpoints()
 {
     static bool done = false;
-    if (done) return;
+    if (done || !g_steerStart) return;
     done = true;
-    uint8_t* base = (uint8_t*)GetModuleHandleW(nullptr);
-    if (memcmp(base + kSteerStartRva, kSteerStartBytes, sizeof(kSteerStartBytes)) != 0 ||
-        memcmp(base + kSteerEndRva, kSteerEndBytes, sizeof(kSteerEndBytes)) != 0)
-    {
-        Log("[camoverride] steering code bytes differ (different build?); head camera would break steering");
-        return;
-    }
     AddVectoredExceptionHandler(1, SteerBreakpointHandler);
     // We're on the game thread; a helper thread must suspend it to set its
     // debug registers. Don't wait (it has to suspend us).
@@ -136,8 +185,9 @@ static void OnCameraUpdate(uint8_t* node, uint8_t* wrapper)
     float* m = (float*)(node + 0x90);
     TerrainObserveCamera(m[12], m[13], m[14]); // game camera: learns heightmap alignment
     float R[9], t[3];
-    if (!StereoTakeHeadForCamera(m, R, t)) return;
     EnsureSteerBreakpoints();
+    if (!g_steerStart) { StereoHeadNotApplied(); return; } // unknown build: turning the camera would reverse steering
+    if (!StereoTakeHeadForCamera(m, R, t)) return;
     memcpy(g_origMatrix, m, 64);
 
     float e[3][4], pos[4];
@@ -189,11 +239,10 @@ bool CamOverrideInstall(float fovDegrees)
 {
     g_wantFov = fovDegrees;
     uint8_t* base = (uint8_t*)GetModuleHandleW(nullptr);
-    uint8_t* site = base + kPatchRva;
-    if (memcmp(site, kExpected, sizeof(kExpected)) != 0)
+    uint8_t* site = FindInExe(std::vector<int>(kExpected, kExpected + sizeof(kExpected)), "camera FOV update");
+    if (!site)
     {
-        Log("[camoverride] unexpected bytes at Flower.exe+0x%llX (different build?); FOV override disabled",
-            (unsigned long long)kPatchRva);
+        Log("[camoverride] camera FOV update code not found (unknown build?); FOV override disabled");
         return false;
     }
 
@@ -253,7 +302,8 @@ bool CamOverrideInstall(float fovDegrees)
     FlushInstructionCache(GetCurrentProcess(), site, 16);
 
     g_installed = true;
-    Log("[camoverride] patched Flower.exe+0x%llX -> stub %p (fov override %.1f deg)", (unsigned long long)kPatchRva, stub, fovDegrees);
+    LocateSteering();
+    Log("[camoverride] patched Flower.exe+0x%llX -> stub %p (fov override %.1f deg)", (unsigned long long)(site - base), stub, fovDegrees);
     return true;
 }
 
