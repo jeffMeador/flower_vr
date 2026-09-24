@@ -502,7 +502,13 @@ static void PrepareDraw(ID3D11DeviceContext* self)
                     Log("[capture] lens: locked at %.1f deg", lockedFov * 57.2958f);
                 }                int mode = Stereo().lensMode;
                 if (mode == 0) break;
-                float useFov = (mode == 1 && lockedFov > 0.0f) ? lockedFov : 1e-4f;
+                // "Off" uses a small but not tiny fov: at 1e-4 rad the GPU's sincos
+                // has an absolute error that is a large *relative* error, so each
+                // grid column of the pass was displaced differently - fixed
+                // blurry vertical bands that warped the view during head motion.
+                // At 0.02 rad the math is accurate and the remaining fisheye is
+                // ~(0.01)^2/3 relative, under 0.1 px.
+                float useFov = (mode == 1 && lockedFov > 0.0f) ? lockedFov : 0.02f;
                 float maxR = *reinterpret_cast<const float*>(patched.data() + off.lensMaxROffset);
                 f[0] = useFov;
                 *reinterpret_cast<float*>(patched.data() + off.lensROffset) = maxR / tanf(useFov * 0.5f);
