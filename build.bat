@@ -28,6 +28,6 @@ copy /y "%WINDIR%\System32\d3d11.dll" build\d3d11_orig.dll >nul
 echo Build succeeded. Deploying to %GAMEDIR%...
 copy /y build\d3d11.dll "%GAMEDIR%\d3d11.dll" >nul
 copy /y build\d3d11_orig.dll "%GAMEDIR%\d3d11_orig.dll" >nul
-xcopy /y /e /i /q overrides "%GAMEDIR%\vrmod_overrides" >nul
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\make_overrides.ps1 -GameDir "%GAMEDIR%"
 
 echo Done. Launch Flower.exe in %GAMEDIR%, then check vrmod.log and frame_*.bmp there

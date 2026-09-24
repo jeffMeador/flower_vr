@@ -24,7 +24,8 @@ Known issues / open:
 - Viewpoint can still dip into terrain on slopes (terrain-aware clamp in
   progress: `src/terrain.cpp`, reads the level heightmap).
 - Level movies are black even without the mod (game/Windows video
-  playback); they're turned off via `overrides/Scripts/MovieBarn.lua`.
+  playback); they're turned off by a `MovieBarn.lua` override that
+  `build.bat` generates from the game's own file (`tools/make_overrides.ps1`).
 - Steam build: different compile. Patch sites are found by pattern now; the
   camera patch resolves on Steam (+0x3EC2E), the steering site doesn't yet, so the
   head-turned camera stays off there. Blocker: the Steam build reads controllers
@@ -191,7 +192,7 @@ switching). Any hook that just overwrites the vtable *pointer* loses this
 race and gets silently reverted before the game's own per-frame calls arrive.
 
 **Fix**: switched to inline/detour hooking via MinHook (vendored in
-`thirdparty/minhook`, MIT license, github.com/TsudaKageyu/minhook) — patches
+`thirdparty/minhook`, BSD 2-Clause license, github.com/TsudaKageyu/minhook) — patches
 the target function's own machine code instead of a pointer to it, so it's
 immune to the runtime reassigning vtable slots. Worked immediately;
 draw-call counters started climbing correctly within one test.
@@ -292,3 +293,13 @@ wider. Camera layout: fov +0x134, near +0x138, far +0x13C, aspect +0x140.
   `reflect_shaders.exe <ShadersDir>` (scans recursively, prints matrix-like
   or camera-ish-named cbuffer vars) or `reflect_shaders.exe --all <file.cso>`
   (dumps every variable in every cbuffer, unfiltered).
+- `tools/make_overrides.ps1` — generates the data overrides from the player's
+  own game files (run by `build.bat`; `-Experimental` adds the camera-trigger
+  overrides into `vrmod_overrides_experimental`, which the mod doesn't read).
+
+## License
+
+MIT (`LICENSE`), by jeffMeador with Claude (Anthropic). Third-party code and
+what must not be redistributed (game files, `d3d11_orig.dll`):
+`THIRD_PARTY_NOTICES.md`. Fan mod, not affiliated with thatgamecompany or
+Annapurna Interactive.
