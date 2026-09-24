@@ -25,8 +25,12 @@ Known issues / open:
   progress: `src/terrain.cpp`, reads the level heightmap).
 - Level movies are black even without the mod (game/Windows video
   playback); they're turned off via `overrides/Scripts/MovieBarn.lua`.
-- Steam build: different compile; camera patch signature found, steering site
-  not yet. Native Steam Frame (Proton/ARM) not attempted.
+- Steam build: different compile. Patch sites are found by pattern now; the
+  camera patch resolves on Steam (+0x3EC2E), the steering site doesn't yet, so the
+  head-turned camera stays off there. Blocker: the Steam build reads controllers
+  through Steam Input, not XInput, so the virtual gamepad (VR controllers,
+  automated testing) doesn't reach it. Possible fix: disable Steam Input for the
+  game in Steam. Parked. Native Steam Frame (Proton/ARM) not attempted.
 ## Current state (Phase 4) — playable in VR
 
 Stereo, head-tracked, 90 fps per eye on SteamVR/OpenXR (tested on an RTX 5090,
