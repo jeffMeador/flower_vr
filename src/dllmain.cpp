@@ -24,8 +24,16 @@ static void LoadRealD3D11(HMODULE self)
     g_realD3D11 = LoadLibraryW(origPath);
     if (!g_realD3D11)
     {
-        // Fallback: shouldn't happen if build.bat deployed d3d11_orig.dll correctly.
-        g_realD3D11 = LoadLibraryW(L"d3d11_orig.dll");
+        // No d3d11_orig.dll next to us (e.g. under Proton, launched with
+        // WINEDLLOVERRIDES="d3d11=n,b"): chain to the system one, which there
+        // is DXVK.
+        wchar_t sysPath[MAX_PATH];
+        UINT n = GetSystemDirectoryW(sysPath, MAX_PATH);
+        if (n && n < MAX_PATH - 12)
+        {
+            wcscat_s(sysPath, L"\\d3d11.dll");
+            g_realD3D11 = LoadLibraryW(sysPath);
+        }
     }
 
     if (g_realD3D11)
@@ -43,7 +51,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
         LoadRealD3D11(hModule);
         LogInit(g_dllDir);
         SetHooksDllDir(g_dllDir);
-        Log("VRMod proxy d3d11.dll attached. real d3d11 loaded: %d", g_realD3D11 != nullptr);
+        wchar_t realPath[MAX_PATH] = L"(none)";
+        if (g_realD3D11) GetModuleFileNameW(g_realD3D11, realPath, MAX_PATH);
+        Log("VRMod proxy d3d11.dll attached. real d3d11: %ls", realPath);
         StereoLoadConfig(g_dllDir);
         if (!HooksPassthrough() && FileRedirectInstall(g_dllDir))
             DisplayModesInstall(); // let the VR config's square resolution be accepted

@@ -28,10 +28,14 @@ Known issues / open:
   `build.bat` generates from the game's own file (`tools/make_overrides.ps1`).
 - Steam build: different compile. Patch sites are found by pattern now; the
   camera patch resolves on Steam (+0x3EC2E), the steering site doesn't yet, so the
-  head-turned camera stays off there. Blocker: the Steam build reads controllers
-  through Steam Input, not XInput, so the virtual gamepad (VR controllers,
-  automated testing) doesn't reach it. Possible fix: disable Steam Input for the
-  game in Steam. Parked. Native Steam Frame (Proton/ARM) not attempted.
+  head-turned camera stays off there. The virtual gamepad does reach it (the
+  automated run flew into level 1; an earlier "Steam Input blocks it" finding was
+  wrong). Open: find its steering code. The camera-matrix watch (Shift+F7) lists
+  9 readers (Flower.exe+0x39CBC looks most like GOG's steering math), but telling
+  them apart needs stick input, which the game only takes with its window focused.
+- Steam Frame (standalone, Proton + FEX): in progress with the GOG build. The
+  proxy chains to the system d3d11.dll (DXVK) when there's no d3d11_orig.dll,
+  and the steering swap is a code patch instead of debug-register breakpoints.
 ## Current state (Phase 4) — playable in VR
 
 Stereo, head-tracked, 90 fps per eye on SteamVR/OpenXR (tested on an RTX 5090,
