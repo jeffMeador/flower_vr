@@ -10,6 +10,7 @@
 #include "camfind.h"
 #include "camoverride.h"
 #include "shadow.h"
+#include "mirror.h"
 #include <cstdio>
 #include <atomic>
 #include <vector>
@@ -243,6 +244,7 @@ static void TimingFrameStart(ID3D11Device* dev, ID3D11DeviceContext* ctx)
 static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 {
     uint64_t frame = g_frameCount.fetch_add(1);
+    MirrorFlush("present"); // the right eye's recorded frame runs now, before the eyes are copied out
     ID3D11Device* timingDev = nullptr;
     ID3D11DeviceContext* timingCtx = nullptr;
     if (SUCCEEDED(This->GetDevice(__uuidof(ID3D11Device), (void**)&timingDev)) && timingDev)
@@ -313,6 +315,12 @@ void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* device, ID
 
     InstallCaptureHooks(device, context);
     ShadowInstall(device, context, Stereo().doubleRender);
+    if (Stereo().doubleRender)
+    {
+        wchar_t ini[MAX_PATH];
+        swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
+        MirrorInstall(device, context, ini);
+    }
     InstallFakePad(g_dllDir);
     XrInit(device, g_dllDir);
     {

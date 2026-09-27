@@ -1,6 +1,7 @@
 #include "shadow.h"
 #include "log.h"
 #include "vhook.h"
+#include "mirror.h"
 #include <cstring>
 #include <cstdint>
 
@@ -68,6 +69,12 @@ static T* Twin(ID3D11DeviceChild* o)
 }
 
 ID3D11Resource* ShadowOfResource(ID3D11Resource* r) { return Twin<ID3D11Resource>(r); }
+ID3D11RenderTargetView* ShadowTwinRTV(ID3D11RenderTargetView* v) { return Twin<ID3D11RenderTargetView>(v); }
+ID3D11DepthStencilView* ShadowTwinDSV(ID3D11DepthStencilView* v) { return Twin<ID3D11DepthStencilView>(v); }
+ID3D11ShaderResourceView* ShadowTwinSRV(ID3D11ShaderResourceView* v) { return Twin<ID3D11ShaderResourceView>(v); }
+
+// The game's own calls on its immediate context (not ours, not a deferred one).
+static bool GameCall(ID3D11DeviceContext* ctx) { return g_enabled && !g_bypass && ctx == g_immediate; }
 
 static bool WantsTwin(const D3D11_TEXTURE2D_DESC& d)
 {
@@ -210,6 +217,7 @@ static void STDMETHODCALLTYPE Hook_OMSetRTs(ID3D11DeviceContext* ctx, UINT num, 
 {
     OnOMSetRTs(ctx, num, rtvs, dsv);
     realOMSetRTs(ctx, num, rtvs, dsv);
+    if (GameCall(ctx)) MirrorSetRenderTargets(num, rtvs, dsv);
 }
 static void STDMETHODCALLTYPE Hook_OMSetRTsUAVs(ID3D11DeviceContext* ctx, UINT num, ID3D11RenderTargetView* const* rtvs, ID3D11DepthStencilView* dsv,
     UINT uavStart, UINT numUavs, ID3D11UnorderedAccessView* const* uavs, const UINT* counts)
@@ -217,15 +225,18 @@ static void STDMETHODCALLTYPE Hook_OMSetRTsUAVs(ID3D11DeviceContext* ctx, UINT n
     if (num != D3D11_KEEP_RENDER_TARGETS_AND_DEPTH_STENCIL) OnOMSetRTs(ctx, num, rtvs, dsv);
     if (numUavs && numUavs != D3D11_KEEP_UNORDERED_ACCESS_VIEWS && uavs && uavs[0]) g_uavCalls++;
     realOMSetRTsUAVs(ctx, num, rtvs, dsv, uavStart, numUavs, uavs, counts);
+    if (GameCall(ctx)) MirrorSetRenderTargetsAndUAVs(num, rtvs, dsv, uavStart, numUavs, uavs, counts);
 }
 
-#define SRV_HOOK(ST) \
+#define SRV_HOOK(ST, MIRROR) \
 static void STDMETHODCALLTYPE Hook_SetSRVs_##ST(ID3D11DeviceContext* ctx, UINT start, UINT n, ID3D11ShaderResourceView* const* v) \
 { \
     if (ctx == g_immediate && !g_bypass && g_enabled) TrackSRVs(ST, start, n, v); \
     realSetSRVs[ST](ctx, start, n, v); \
+    if (MIRROR && GameCall(ctx)) MirrorSetShaderResources((MirrorStage)ST, start, n, v); \
 }
-SRV_HOOK(VS) SRV_HOOK(PS) SRV_HOOK(GS) SRV_HOOK(HS) SRV_HOOK(DS) SRV_HOOK(CS)
+// (compute isn't mirrored: the game dispatches nothing, and a dispatch flushes)
+SRV_HOOK(VS, true) SRV_HOOK(PS, true) SRV_HOOK(GS, true) SRV_HOOK(HS, true) SRV_HOOK(DS, true) SRV_HOOK(CS, false)
 
 static void STDMETHODCALLTYPE Hook_ClearState(ID3D11DeviceContext* ctx)
 {
@@ -235,25 +246,29 @@ static void STDMETHODCALLTYPE Hook_ClearState(ID3D11DeviceContext* ctx)
         for (int st = 0; st < kStages; ++st) TrackSRVs((Stage)st, 0, kMaxSRV, nullptr);
     }
     realClearState(ctx);
+    if (GameCall(ctx)) MirrorClearState();
 }
 
 // ---- mirrored operations ----
 static void STDMETHODCALLTYPE Hook_ClearRTV(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* v, const FLOAT color[4])
 {
     realClearRTV(ctx, v, color);
-    if (g_enabled && !g_bypass)
+    if (GameCall(ctx) && MirrorActive()) { MirrorClearRTV(v, color); return; }
+    if (GameCall(ctx))
         if (ID3D11RenderTargetView* t = Twin<ID3D11RenderTargetView>(v)) { realClearRTV(ctx, t, color); t->Release(); g_mirroredClears++; }
 }
 static void STDMETHODCALLTYPE Hook_ClearDSV(ID3D11DeviceContext* ctx, ID3D11DepthStencilView* v, UINT flags, FLOAT depth, UINT8 stencil)
 {
     realClearDSV(ctx, v, flags, depth, stencil);
-    if (g_enabled && !g_bypass)
+    if (GameCall(ctx) && MirrorActive()) { MirrorClearDSV(v, flags, depth, stencil); return; }
+    if (GameCall(ctx))
         if (ID3D11DepthStencilView* t = Twin<ID3D11DepthStencilView>(v)) { realClearDSV(ctx, t, flags, depth, stencil); t->Release(); g_mirroredClears++; }
 }
 static void STDMETHODCALLTYPE Hook_CopyResource(ID3D11DeviceContext* ctx, ID3D11Resource* dst, ID3D11Resource* src)
 {
     realCopyResource(ctx, dst, src);
-    if (!g_enabled || g_bypass) return;
+    if (!GameCall(ctx)) return;
+    if (MirrorActive()) { MirrorCopyResource(dst, src); return; }
     if (ID3D11Resource* td = Twin<ID3D11Resource>(dst))
     {
         ID3D11Resource* ts = Twin<ID3D11Resource>(src);
@@ -266,7 +281,8 @@ static void STDMETHODCALLTYPE Hook_CopyResource(ID3D11DeviceContext* ctx, ID3D11
 static void STDMETHODCALLTYPE Hook_CopyRegion(ID3D11DeviceContext* ctx, ID3D11Resource* dst, UINT dsub, UINT x, UINT y, UINT z, ID3D11Resource* src, UINT ssub, const D3D11_BOX* box)
 {
     realCopyRegion(ctx, dst, dsub, x, y, z, src, ssub, box);
-    if (!g_enabled || g_bypass) return;
+    if (!GameCall(ctx)) return;
+    if (MirrorActive()) { MirrorCopyRegion(dst, dsub, x, y, z, src, ssub, box); return; }
     if (ID3D11Resource* td = Twin<ID3D11Resource>(dst))
     {
         ID3D11Resource* ts = Twin<ID3D11Resource>(src);
@@ -279,7 +295,8 @@ static void STDMETHODCALLTYPE Hook_CopyRegion(ID3D11DeviceContext* ctx, ID3D11Re
 static void STDMETHODCALLTYPE Hook_Resolve(ID3D11DeviceContext* ctx, ID3D11Resource* dst, UINT dsub, ID3D11Resource* src, UINT ssub, DXGI_FORMAT fmt)
 {
     realResolve(ctx, dst, dsub, src, ssub, fmt);
-    if (!g_enabled || g_bypass) return;
+    if (!GameCall(ctx)) return;
+    if (MirrorActive()) { MirrorResolve(dst, dsub, src, ssub, fmt); return; }
     if (ID3D11Resource* td = Twin<ID3D11Resource>(dst))
     {
         ID3D11Resource* ts = Twin<ID3D11Resource>(src);
@@ -292,18 +309,21 @@ static void STDMETHODCALLTYPE Hook_Resolve(ID3D11DeviceContext* ctx, ID3D11Resou
 static void STDMETHODCALLTYPE Hook_GenerateMips(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* v)
 {
     realGenerateMips(ctx, v);
-    if (g_enabled && !g_bypass)
+    if (GameCall(ctx) && MirrorActive()) { MirrorGenerateMips(v); return; }
+    if (GameCall(ctx))
         if (ID3D11ShaderResourceView* t = Twin<ID3D11ShaderResourceView>(v)) { realGenerateMips(ctx, t); t->Release(); }
 }
 static void STDMETHODCALLTYPE Hook_Dispatch(ID3D11DeviceContext* ctx, UINT x, UINT y, UINT z)
 {
     g_dispatches++;
+    if (GameCall(ctx)) MirrorFlush("dispatch"); // compute isn't mirrored; recorded draws go first
     realDispatch(ctx, x, y, z);
 }
 
 void ShadowOnUpdateSubresource(ID3D11DeviceContext* ctx, ID3D11Resource* dst, UINT sub, const D3D11_BOX* box, const void* src, UINT rowPitch, UINT depthPitch)
 {
-    if (!g_enabled || g_bypass) return;
+    if (!GameCall(ctx)) return;
+    if (MirrorActive()) { MirrorUpdateSubresource(dst, sub, box, src, rowPitch, depthPitch); return; }
     if (ID3D11Resource* td = Twin<ID3D11Resource>(dst))
     {
         ShadowBypass guard;

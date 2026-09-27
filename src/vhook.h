@@ -43,7 +43,13 @@ inline bool HookMethod(void** vtable, int index, void* detour, void** original, 
     }
 
     void* target = vtable[index];
-    if (hooked.count(target)) return true; // same implementation already hooked
+    if (hooked.count(target))
+    {
+        // Two slots share one implementation: it already has a (different)
+        // detour, so this one can't be installed. Callers must not assume it is.
+        Log("[hook] %s shares its implementation (%p) with an already hooked method", name, target);
+        return false;
+    }
     MH_Initialize(); // harmless if already initialized
     MH_STATUS st = MH_CreateHook(target, detour, original);
     if (st == MH_OK || st == MH_ERROR_ALREADY_CREATED) st = MH_EnableHook(target);

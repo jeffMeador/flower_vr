@@ -24,8 +24,11 @@ bool ShadowBindRightEye(ID3D11DeviceContext* ctx);
 // Restore the game's own bindings after the right-eye draw.
 void ShadowRestore(ID3D11DeviceContext* ctx);
 
-// Twin of a resource (AddRef'd) or null.
+// Twin of a resource / view (AddRef'd) or null.
 ID3D11Resource* ShadowOfResource(ID3D11Resource* r);
+ID3D11RenderTargetView* ShadowTwinRTV(ID3D11RenderTargetView* v);
+ID3D11DepthStencilView* ShadowTwinDSV(ID3D11DepthStencilView* v);
+ID3D11ShaderResourceView* ShadowTwinSRV(ID3D11ShaderResourceView* v);
 
 // Mirror a whole-resource/region UpdateSubresource onto the twin.
 void ShadowOnUpdateSubresource(ID3D11DeviceContext* ctx, ID3D11Resource* dst, UINT sub, const D3D11_BOX* box, const void* src, UINT rowPitch, UINT depthPitch);

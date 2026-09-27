@@ -3,6 +3,7 @@
 #include "mat4.h"
 #include "stereo.h"
 #include "shadow.h"
+#include "mirror.h"
 #include "vhook.h"
 #include <d3d11shader.h>
 #include <d3dcompiler.h>
@@ -88,6 +89,9 @@ ID3D11Resource* CaptureSceneDepth()
     return g_sceneDepth;
 }
 static int g_logBudget = 0;
+static ID3D11DeviceContext* g_immediateCtx = nullptr;
+// The game's own calls on its immediate context (not ours, not a deferred one).
+static bool GameCall(ID3D11DeviceContext* ctx) { return ctx == g_immediateCtx && !ShadowBypassed(); }
 static bool g_vpObservedThisFrame = false;
 
 static std::atomic<uint64_t> g_countVSSetShader{ 0 };
@@ -227,17 +231,21 @@ static HRESULT STDMETHODCALLTYPE Hook_CreateVertexShader(ID3D11Device* self, con
 
 static void STDMETHODCALLTYPE Hook_VSSetShader(ID3D11DeviceContext* self, ID3D11VertexShader* shader, ID3D11ClassInstance* const* instances, UINT numInstances)
 {
+    if (!GameCall(self)) { g_realVSSetShader(self, shader, instances, numInstances); return; }
     g_countVSSetShader++;
-    if (!ShadowBypassed()) g_contextState[self].currentVS = shader; // not our own XR-time draws
+    g_contextState[self].currentVS = shader;
     g_realVSSetShader(self, shader, instances, numInstances);
+    MirrorSetShader(MS_VS, shader, instances, numInstances);
 }
 
 static void STDMETHODCALLTYPE Hook_VSSetConstantBuffers(ID3D11DeviceContext* self, UINT startSlot, UINT numBuffers, ID3D11Buffer* const* buffers)
 {
+    if (!GameCall(self)) { g_realVSSetConstantBuffers(self, startSlot, numBuffers, buffers); return; }
     g_countVSSetCB++;
-    if (startSlot <= 0 && 0 < startSlot + numBuffers && buffers && !ShadowBypassed())
-        g_contextState[self].currentSlot0CB = buffers[0 - startSlot];
+    if (startSlot <= 0 && 0 < startSlot + numBuffers)
+        g_contextState[self].currentSlot0CB = buffers ? buffers[0 - startSlot] : nullptr;
     g_realVSSetConstantBuffers(self, startSlot, numBuffers, buffers);
+    MirrorSetConstantBuffers(MS_VS, startSlot, numBuffers, buffers);
 }
 
 // ---- pixel shaders: find depth-of-field constants ----
@@ -300,16 +308,20 @@ static HRESULT STDMETHODCALLTYPE Hook_CreatePixelShader(ID3D11Device* self, cons
 
 static void STDMETHODCALLTYPE Hook_PSSetShader(ID3D11DeviceContext* self, ID3D11PixelShader* shader, ID3D11ClassInstance* const* inst, UINT n)
 {
-    if (!ShadowBypassed()) g_contextState[self].currentPS = shader;
+    if (!GameCall(self)) { g_realPSSetShader(self, shader, inst, n); return; }
+    g_contextState[self].currentPS = shader;
     g_realPSSetShader(self, shader, inst, n);
+    MirrorSetShader(MS_PS, shader, inst, n);
 }
 
 static void STDMETHODCALLTYPE Hook_PSSetConstantBuffers(ID3D11DeviceContext* self, UINT start, UINT n, ID3D11Buffer* const* buffers)
 {
+    if (!GameCall(self)) { g_realPSSetConstantBuffers(self, start, n, buffers); return; }
     ContextState& st = g_contextState[self];
-    for (UINT i = 0; i < n && buffers && !ShadowBypassed(); ++i)
-        if (start + i < 4) st.psCB[start + i] = buffers[i];
+    for (UINT i = 0; i < n; ++i)
+        if (start + i < 4) st.psCB[start + i] = buffers ? buffers[i] : nullptr;
     g_realPSSetConstantBuffers(self, start, n, buffers);
+    MirrorSetConstantBuffers(MS_PS, start, n, buffers);
 }
 
 static void RecordGameWrite(ID3D11Resource* resource, const void* src)
@@ -340,7 +352,9 @@ static void RecordGameWrite(ID3D11Resource* resource, const void* src)
 
 static HRESULT STDMETHODCALLTYPE Hook_Map(ID3D11DeviceContext* self, ID3D11Resource* resource, UINT sub, D3D11_MAP mapType, UINT flags, D3D11_MAPPED_SUBRESOURCE* out)
 {
+    if (!GameCall(self)) return g_realMap(self, resource, sub, mapType, flags, out);
     g_countMap++;
+    MirrorBeforeMap(resource, mapType);
     HRESULT hr = g_realMap(self, resource, sub, mapType, flags, out);
     if (SUCCEEDED(hr) && out && mapType != D3D11_MAP_READ)
     {
@@ -352,11 +366,13 @@ static HRESULT STDMETHODCALLTYPE Hook_Map(ID3D11DeviceContext* self, ID3D11Resou
 
 static void STDMETHODCALLTYPE Hook_Unmap(ID3D11DeviceContext* self, ID3D11Resource* resource, UINT sub)
 {
+    if (!GameCall(self)) { g_realUnmap(self, resource, sub); return; }
     g_countUnmap++;
     auto it = g_activeMap.find(resource);
     if (it != g_activeMap.end())
     {
         RecordGameWrite(resource, it->second);
+        MirrorUnmap(resource, it->second); // before the real Unmap: the pointer dies with it
         g_activeMap.erase(it);
     }
     g_realUnmap(self, resource, sub);
@@ -364,8 +380,9 @@ static void STDMETHODCALLTYPE Hook_Unmap(ID3D11DeviceContext* self, ID3D11Resour
 
 static void STDMETHODCALLTYPE Hook_UpdateSubresource(ID3D11DeviceContext* self, ID3D11Resource* dst, UINT dstSub, const D3D11_BOX* box, const void* src, UINT rowPitch, UINT depthPitch)
 {
+    if (!GameCall(self)) { g_realUpdateSubresource(self, dst, dstSub, box, src, rowPitch, depthPitch); return; }
     g_countUpdateSubresource++;
-    if (dstSub == 0 && !ShadowBypassed())
+    if (dstSub == 0)
         RecordGameWrite(dst, box ? nullptr : src); // partial updates: can't mirror, mark invalid
     g_realUpdateSubresource(self, dst, dstSub, box, src, rowPitch, depthPitch);
     ShadowOnUpdateSubresource(self, dst, dstSub, box, src, rowPitch, depthPitch);
@@ -385,6 +402,10 @@ static void WriteBuffer(ID3D11DeviceContext* ctx, ID3D11Resource* buf, const Buf
     else if (s.usage == D3D11_USAGE_DEFAULT)
         g_realUpdateSubresource(ctx, buf, 0, nullptr, data, 0, 0);
 }
+
+static bool BuildPatched(const ShaderOffsets& off, const std::vector<uint8_t>& orig, std::vector<uint8_t>& patched);
+static void FinishPrepareDraw(ID3D11DeviceContext* self, ContextState& state, const ShaderOffsets& off, BufferShadow& s,
+    const std::vector<uint8_t>& orig, const std::vector<uint8_t>& patched, bool any, bool gpuIsOriginal, uint64_t key);
 
 // Before each draw: recover the camera once per frame, then rewrite the bound
 // slot-0 cbuffer with this eye's matrices (built from the game's original data).
@@ -430,8 +451,6 @@ static void PrepareDraw(ID3D11DeviceContext* self)
     }
 
     uint64_t key = StereoPatchKey();
-    float eyeOff[3];
-    bool eyePos = StereoWorldEyeOffset(eyeOff);
 
     // GPU copy already matches what we want?
     bool gpuIsOriginal = s.patchedGen != s.gen;
@@ -443,9 +462,18 @@ static void PrepareDraw(ID3D11DeviceContext* self)
     }
 
     static std::vector<uint8_t> patched;
+    bool any = key != 0 && BuildPatched(off, orig, patched);
+    FinishPrepareDraw(self, state, off, s, orig, patched, any, gpuIsOriginal, key);
+}
+
+// This eye's version of a slot-0 constant buffer (camera matrices, eye
+// position, lens). False if nothing needed patching.
+static bool BuildPatched(const ShaderOffsets& off, const std::vector<uint8_t>& orig, std::vector<uint8_t>& patched)
+{
+    float eyeOff[3];
+    bool eyePos = StereoWorldEyeOffset(eyeOff);
     patched = orig;
     bool any = false;
-    if (key != 0)
     {
         for (const PatchVar& p : off.patches)
         {
@@ -518,6 +546,12 @@ static void PrepareDraw(ID3D11DeviceContext* self)
             }
         }
     }
+    return any;
+}
+
+static void FinishPrepareDraw(ID3D11DeviceContext* self, ContextState& state, const ShaderOffsets& off, BufferShadow& s,
+    const std::vector<uint8_t>& orig, const std::vector<uint8_t>& patched, bool any, bool gpuIsOriginal, uint64_t key)
+{
 
     // Scene depth for the headset: the depth buffer of the frame's first 3D
     // draw (left eye; the right eye's is its twin).
@@ -619,28 +653,104 @@ static void PreparePixel(ID3D11DeviceContext* self)
     }
 }
 
+// Batched double render: this draw's right-eye constants, written on the
+// mirror's deferred context (the immediate context keeps the left eye's).
+static void PrepareDrawRight()
+{
+    ContextState& state = g_contextState[g_immediateCtx];
+    auto offIt = g_offsets.find(state.currentVS);
+    if (offIt == g_offsets.end() || offIt->second.patches.empty()) return;
+    auto shIt = g_cbShadow.find(state.currentSlot0CB);
+    if (shIt == g_cbShadow.end() || !shIt->second.valid || StereoPatchKey() == 0) return;
+    BufferShadow& s = shIt->second;
+    static std::vector<uint8_t> patched;
+    if (BuildPatched(offIt->second, s.data, patched))
+        MirrorWriteBuffer(state.currentSlot0CB, patched.data(), (UINT)patched.size(), s.usage);
+}
+
+static void PreparePixelRight()
+{
+    ContextState& st = g_contextState[g_immediateCtx];
+    auto it = g_psOverrides.find(st.currentPS);
+    if (it == g_psOverrides.end()) return;
+    bool vr = StereoPatchKey() != 0;
+    bool dofOff = vr && !Stereo().depthOfField;
+    bool trailsOff = vr && !Stereo().motionBlur;
+    for (UINT slot = 0; slot < 4; ++slot)
+    {
+        ID3D11Resource* buf = st.psCB[slot];
+        auto sh = g_cbShadow.find(buf);
+        if (sh == g_cbShadow.end() || !sh->second.valid) continue;
+        static std::vector<uint8_t> patched;
+        patched = sh->second.data;
+        bool any = false;
+        for (const PixelOverride& o : it->second)
+        {
+            if (o.slot != slot || o.offset + 4 > patched.size()) continue;
+            if (!(o.kind == PixelOverride::DepthOfField ? dofOff : trailsOff)) continue;
+            *reinterpret_cast<float*>(patched.data() + o.offset) = o.value;
+            any = true;
+        }
+        if (any) MirrorWriteBuffer(buf, patched.data(), (UINT)patched.size(), sh->second.usage);
+    }
+}
+
+// After the mirror's command list ran, a buffer holds whatever the right eye
+// last wrote: put the game's own (latest) data back.
+void CaptureRestoreOriginal(ID3D11DeviceContext* ctx, ID3D11Resource* buf)
+{
+    auto it = g_cbShadow.find(buf);
+    if (it == g_cbShadow.end()) return;
+    BufferShadow& s = it->second;
+    if (s.valid)
+    {
+        WriteBuffer(ctx, buf, s, s.data.data());
+        s.patchedGen = ~0ull; // GPU holds the original
+    }
+    else
+    {
+        s.patchedGen = s.gen; // unknown: force the next patch to rewrite
+        s.patchedLayout = nullptr;
+    }
+}
+
 // Issue one game draw: patched for the current eye (alternate-eye mode), or
 // twice - left eye into the game's targets, right eye into their twins.
 template <class F>
 static void StereoDraw(ID3D11DeviceContext* self, F&& draw)
 {
+    if (self != g_immediateCtx) { draw(self); return; } // e.g. the mirror's own deferred context
     if (!Stereo().doubleRender || ShadowBypassed())
     {
         PrepareDraw(self);
         PreparePixel(self);
-        draw();
+        draw(self);
         return;
     }
     StereoSetRenderEye(0);
     PrepareDraw(self);
     PreparePixel(self);
-    draw();
+    draw(self);
+    if (MirrorActive())
+    {
+        // Batched: record the right eye's draw; it runs with the rest at Present.
+        if (MirrorRightOutputsValid())
+        {
+            StereoSetRenderEye(1);
+            PrepareDrawRight();
+            PreparePixelRight();
+            draw(MirrorContext());
+            MirrorNoteDraw();
+            StereoSetRenderEye(0);
+        }
+        return;
+    }
     if (ShadowBindRightEye(self))
     {
         StereoSetRenderEye(1);
         PrepareDraw(self);
         PreparePixel(self);
-        draw();
+        draw(self);
         ShadowRestore(self);
         StereoSetRenderEye(0);
     }
@@ -649,22 +759,22 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw)
 static void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* self, UINT count, UINT start, INT base)
 {
     g_countDrawIndexed++;
-    StereoDraw(self, [&] { g_realDrawIndexed(self, count, start, base); });
+    StereoDraw(self, [&](ID3D11DeviceContext* c) { if (c == self) g_realDrawIndexed(c, count, start, base); else c->DrawIndexed(count, start, base); });
 }
 static void STDMETHODCALLTYPE Hook_Draw(ID3D11DeviceContext* self, UINT count, UINT start)
 {
     g_countDraw++;
-    StereoDraw(self, [&] { g_realDraw(self, count, start); });
+    StereoDraw(self, [&](ID3D11DeviceContext* c) { if (c == self) g_realDraw(c, count, start); else c->Draw(count, start); });
 }
 static void STDMETHODCALLTYPE Hook_DrawIndexedInstanced(ID3D11DeviceContext* self, UINT ipc, UINT ic, UINT sil, INT bvl, UINT sii)
 {
     g_countDrawIndexedInstanced++;
-    StereoDraw(self, [&] { g_realDrawIndexedInstanced(self, ipc, ic, sil, bvl, sii); });
+    StereoDraw(self, [&](ID3D11DeviceContext* c) { if (c == self) g_realDrawIndexedInstanced(c, ipc, ic, sil, bvl, sii); else c->DrawIndexedInstanced(ipc, ic, sil, bvl, sii); });
 }
 static void STDMETHODCALLTYPE Hook_DrawInstanced(ID3D11DeviceContext* self, UINT vpi, UINT ic, UINT sv, UINT si)
 {
     g_countDrawInstanced++;
-    StereoDraw(self, [&] { g_realDrawInstanced(self, vpi, ic, sv, si); });
+    StereoDraw(self, [&](ID3D11DeviceContext* c) { if (c == self) g_realDrawInstanced(c, vpi, ic, sv, si); else c->DrawInstanced(vpi, ic, sv, si); });
 }
 void NotifyCaptureFrameBoundary()
 {
@@ -691,12 +801,14 @@ void NotifyCaptureFrameBoundary()
             (unsigned long long)g_mapTypeCount[D3D11_MAP_WRITE], (unsigned long long)g_mapTypeCount[D3D11_MAP_READ_WRITE],
             (unsigned long long)g_mapTypeCount[D3D11_MAP_WRITE_DISCARD], (unsigned long long)g_mapTypeCount[D3D11_MAP_WRITE_NO_OVERWRITE]);
         ShadowLogStats();
+        MirrorLogStats();
     }
 }
 
 void InstallCaptureHooks(ID3D11Device* device, ID3D11DeviceContext* context)
 {
     if (!device || !context) return;
+    g_immediateCtx = context;
 
     static bool minHookInit = false;
     if (!minHookInit)

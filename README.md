@@ -33,9 +33,42 @@ Known issues / open:
   wrong). Open: find its steering code. The camera-matrix watch (Shift+F7) lists
   9 readers (Flower.exe+0x39CBC looks most like GOG's steering math), but telling
   them apart needs stick input, which the game only takes with its window focused.
-- Steam Frame (standalone, Proton + FEX): in progress with the GOG build. The
-  proxy chains to the system d3d11.dll (DXVK) when there's no d3d11_orig.dll,
-  and the steering swap is a code patch instead of debug-register breakpoints.
+
+## Steam Frame, standalone (branch `frame-port`)
+
+The GOG build runs on the headset itself (Snapdragon 8 Gen 3, SteamOS) through
+Proton 11 (ARM64) + FEX, with VR through Proton's `wineopenxr` into the Frame's
+SteamVR. What it took:
+
+- **Graphics:** the proxy chains to the system `d3d11.dll` (Proton's DXVK, ARM64EC)
+  when there's no `d3d11_orig.dll`. COM methods are hooked by vtable slot under
+  Wine (`src/vhook.h`); MinHook's x86 patches corrupt ARM64EC code.
+- **Steering:** a code patch instead of debug-register breakpoints (FEX has none).
+- **OpenXR:** SteamVR's Windows `openxr_loader.dll` next to the game, `[xr] loader=openxr_loader.dll`.
+- **Square resolution:** the game uses the display mode *after* the one matching
+  its settings file (on the Frame the last entry read past the list: 480x90000,
+  60000x1000...). `[xr] maxSquare=N` reports only N x N, repeated.
+- **Batched double render** (`src/mirror.cpp`): the right eye is recorded on a
+  deferred context and runs as one command list at Present. Alternating the eyes
+  per draw broke every render pass of the tile-based GPU: both eyes took 13.0 ms
+  of GPU time (one eye 4.4 ms); batched, 7.9 ms. Pixel-identical to the left eye
+  with zero separation. `[stereo] batch=0` restores the per-draw path.
+
+Measured in level 1 with the headset on the table (`[perf]` log, 72 Hz = 13.9 ms budget):
+
+| Per eye | Grass | GPU |
+|---|---|---|
+| 1440 | Low (256/64 per cell) | 7.9 ms |
+| 1728 | Low | 9.1 ms |
+| 1728 | Medium | 10.1 ms |
+
+Setup on the Frame (Desktop Mode, SSH): game in `~/Games/Flower_GOG` without
+`d3d11_orig.dll`; `tools/frame/run_flower.sh` launches it (no Steam shortcut
+needed), `tools/frame/level1_bench.sh` flies into level 1 and prints timings.
+Settings used: `vrmod_Flower.cfg` 1440x1440, MSAA 1, grass Density/Distance/Effects
+Low, Low GrassPerCell 256 / GrassPerClump 64, Anisotrophy 4; `vrmod.ini`
+`maxSquare=1440`, `motionBlur=0`, `loader=openxr_loader.dll`.
+
 ## Current state (Phase 4) — playable in VR
 
 Stereo, head-tracked, 90 fps per eye on SteamVR/OpenXR (tested on an RTX 5090,
