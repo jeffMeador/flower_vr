@@ -22,10 +22,13 @@ extern "C" HRESULT WINAPI Hook_D3D11CreateDeviceAndSwapChain(
     CONST DXGI_SWAP_CHAIN_DESC* pSwapChainDesc, IDXGISwapChain** ppSwapChain,
     ID3D11Device** ppDevice, D3D_FEATURE_LEVEL* pFeatureLevel, ID3D11DeviceContext** ppImmediateContext)
 {
-    Log("D3D11CreateDeviceAndSwapChain called. requestedFormat=%d width=%u height=%u",
+    Log("D3D11CreateDeviceAndSwapChain called. requestedFormat=%d width=%u height=%u refresh=%u/%u windowed=%d",
         pSwapChainDesc ? (int)pSwapChainDesc->BufferDesc.Format : -1,
         pSwapChainDesc ? pSwapChainDesc->BufferDesc.Width : 0,
-        pSwapChainDesc ? pSwapChainDesc->BufferDesc.Height : 0);
+        pSwapChainDesc ? pSwapChainDesc->BufferDesc.Height : 0,
+        pSwapChainDesc ? pSwapChainDesc->BufferDesc.RefreshRate.Numerator : 0,
+        pSwapChainDesc ? pSwapChainDesc->BufferDesc.RefreshRate.Denominator : 0,
+        pSwapChainDesc ? (int)pSwapChainDesc->Windowed : -1);
 
     HRESULT hr = g_real_D3D11CreateDeviceAndSwapChain(pAdapter, DriverType, Software, Flags,
         pFeatureLevels, FeatureLevels, SDKVersion, pSwapChainDesc, ppSwapChain,

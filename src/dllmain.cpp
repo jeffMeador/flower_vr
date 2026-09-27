@@ -56,7 +56,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
         Log("VRMod proxy d3d11.dll attached. real d3d11: %ls", realPath);
         StereoLoadConfig(g_dllDir);
         if (!HooksPassthrough() && FileRedirectInstall(g_dllDir))
-            DisplayModesInstall(); // let the VR config's square resolution be accepted
+            DisplayModesInstall(g_dllDir); // let the VR config's square resolution be accepted
     }
     return TRUE;
 }

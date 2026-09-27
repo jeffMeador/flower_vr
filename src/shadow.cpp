@@ -1,6 +1,6 @@
 #include "shadow.h"
 #include "log.h"
-#include <MinHook.h>
+#include "vhook.h"
 #include <cstring>
 #include <cstdint>
 
@@ -371,18 +371,6 @@ void ShadowLogStats()
 }
 
 // ---- install ----
-static bool Hook(void* target, void* detour, void** original, const char* name)
-{
-    MH_STATUS st = MH_CreateHook(target, detour, original);
-    if (st == MH_OK) st = MH_EnableHook(target);
-    if (st != MH_OK)
-    {
-        Log("[shadow] hook %s at %p FAILED: %s", name, target, MH_StatusToString(st));
-        return false;
-    }
-    return true;
-}
-
 void ShadowInstall(ID3D11Device* device, ID3D11DeviceContext* context, bool enabled)
 {
     g_enabled = enabled;
@@ -392,26 +380,26 @@ void ShadowInstall(ID3D11Device* device, ID3D11DeviceContext* context, bool enab
 
     void** dv = *reinterpret_cast<void***>(device);
     void** cv = *reinterpret_cast<void***>(context);
-    Hook(dv[5], (void*)&Hook_CreateTexture2D, (void**)&realCreateTexture2D, "CreateTexture2D");
-    Hook(dv[7], (void*)&Hook_CreateSRV, (void**)&realCreateSRV, "CreateShaderResourceView");
-    Hook(dv[9], (void*)&Hook_CreateRTV, (void**)&realCreateRTV, "CreateRenderTargetView");
-    Hook(dv[10], (void*)&Hook_CreateDSV, (void**)&realCreateDSV, "CreateDepthStencilView");
+    HookMethod(dv, 5, (void*)&Hook_CreateTexture2D, (void**)&realCreateTexture2D, "CreateTexture2D");
+    HookMethod(dv, 7, (void*)&Hook_CreateSRV, (void**)&realCreateSRV, "CreateShaderResourceView");
+    HookMethod(dv, 9, (void*)&Hook_CreateRTV, (void**)&realCreateRTV, "CreateRenderTargetView");
+    HookMethod(dv, 10, (void*)&Hook_CreateDSV, (void**)&realCreateDSV, "CreateDepthStencilView");
 
-    Hook(cv[8], (void*)&Hook_SetSRVs_PS, (void**)&realSetSRVs[PS], "PSSetShaderResources");
-    Hook(cv[25], (void*)&Hook_SetSRVs_VS, (void**)&realSetSRVs[VS], "VSSetShaderResources");
-    Hook(cv[31], (void*)&Hook_SetSRVs_GS, (void**)&realSetSRVs[GS], "GSSetShaderResources");
-    Hook(cv[59], (void*)&Hook_SetSRVs_HS, (void**)&realSetSRVs[HS], "HSSetShaderResources");
-    Hook(cv[63], (void*)&Hook_SetSRVs_DS, (void**)&realSetSRVs[DS], "DSSetShaderResources");
-    Hook(cv[67], (void*)&Hook_SetSRVs_CS, (void**)&realSetSRVs[CS], "CSSetShaderResources");
-    Hook(cv[33], (void*)&Hook_OMSetRTs, (void**)&realOMSetRTs, "OMSetRenderTargets");
-    Hook(cv[34], (void*)&Hook_OMSetRTsUAVs, (void**)&realOMSetRTsUAVs, "OMSetRenderTargetsAndUnorderedAccessViews");
-    Hook(cv[41], (void*)&Hook_Dispatch, (void**)&realDispatch, "Dispatch");
-    Hook(cv[46], (void*)&Hook_CopyRegion, (void**)&realCopyRegion, "CopySubresourceRegion");
-    Hook(cv[47], (void*)&Hook_CopyResource, (void**)&realCopyResource, "CopyResource");
-    Hook(cv[50], (void*)&Hook_ClearRTV, (void**)&realClearRTV, "ClearRenderTargetView");
-    Hook(cv[53], (void*)&Hook_ClearDSV, (void**)&realClearDSV, "ClearDepthStencilView");
-    Hook(cv[54], (void*)&Hook_GenerateMips, (void**)&realGenerateMips, "GenerateMips");
-    Hook(cv[57], (void*)&Hook_Resolve, (void**)&realResolve, "ResolveSubresource");
-    Hook(cv[110], (void*)&Hook_ClearState, (void**)&realClearState, "ClearState");
+    HookMethod(cv, 8, (void*)&Hook_SetSRVs_PS, (void**)&realSetSRVs[PS], "PSSetShaderResources");
+    HookMethod(cv, 25, (void*)&Hook_SetSRVs_VS, (void**)&realSetSRVs[VS], "VSSetShaderResources");
+    HookMethod(cv, 31, (void*)&Hook_SetSRVs_GS, (void**)&realSetSRVs[GS], "GSSetShaderResources");
+    HookMethod(cv, 59, (void*)&Hook_SetSRVs_HS, (void**)&realSetSRVs[HS], "HSSetShaderResources");
+    HookMethod(cv, 63, (void*)&Hook_SetSRVs_DS, (void**)&realSetSRVs[DS], "DSSetShaderResources");
+    HookMethod(cv, 67, (void*)&Hook_SetSRVs_CS, (void**)&realSetSRVs[CS], "CSSetShaderResources");
+    HookMethod(cv, 33, (void*)&Hook_OMSetRTs, (void**)&realOMSetRTs, "OMSetRenderTargets");
+    HookMethod(cv, 34, (void*)&Hook_OMSetRTsUAVs, (void**)&realOMSetRTsUAVs, "OMSetRenderTargetsAndUnorderedAccessViews");
+    HookMethod(cv, 41, (void*)&Hook_Dispatch, (void**)&realDispatch, "Dispatch");
+    HookMethod(cv, 46, (void*)&Hook_CopyRegion, (void**)&realCopyRegion, "CopySubresourceRegion");
+    HookMethod(cv, 47, (void*)&Hook_CopyResource, (void**)&realCopyResource, "CopyResource");
+    HookMethod(cv, 50, (void*)&Hook_ClearRTV, (void**)&realClearRTV, "ClearRenderTargetView");
+    HookMethod(cv, 53, (void*)&Hook_ClearDSV, (void**)&realClearDSV, "ClearDepthStencilView");
+    HookMethod(cv, 54, (void*)&Hook_GenerateMips, (void**)&realGenerateMips, "GenerateMips");
+    HookMethod(cv, 57, (void*)&Hook_Resolve, (void**)&realResolve, "ResolveSubresource");
+    HookMethod(cv, 110, (void*)&Hook_ClearState, (void**)&realClearState, "ClearState");
     Log("[shadow] double render enabled; hooks installed");
 }

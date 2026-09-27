@@ -142,13 +142,117 @@ static void DumpBackbufferBMP(IDXGISwapChain* swapChain, uint64_t frameIndex, bo
     device->Release();
 }
 
+// ---- frame timing ----
+// In VR xrWaitFrame paces every frame to the display, so the frame interval
+// can't show headroom. Measure the GPU time (timestamp queries from the end of
+// one Present to the start of the next) and the game's CPU time (same span on
+// the CPU clock) separately; logged every 5 s as [perf].
+struct GpuTimer { ID3D11Query* disjoint = nullptr; ID3D11Query* begin = nullptr; ID3D11Query* end = nullptr; bool pending = false; };
+static GpuTimer g_timers[8];
+static int g_openTimer = -1;
+static LARGE_INTEGER g_qpf = {}, g_frameStart = {};
+static double g_gpuSum = 0, g_gpuWorst = 0, g_cpuSum = 0, g_cpuWorst = 0;
+static int g_gpuN = 0, g_cpuN = 0;
+static double g_xrSum = 0, g_xrWorst = 0, g_presentSum = 0, g_presentWorst = 0;
+static int g_blockN = 0;
+
+// Times a blocking call (the XR frame wait/submit, the game's own Present).
+struct BlockTimer
+{
+    LARGE_INTEGER t0;
+    double& sum; double& worst;
+    BlockTimer(double& s, double& w) : sum(s), worst(w) { QueryPerformanceCounter(&t0); }
+    ~BlockTimer()
+    {
+        LARGE_INTEGER t1, f;
+        QueryPerformanceCounter(&t1); QueryPerformanceFrequency(&f);
+        double ms = (t1.QuadPart - t0.QuadPart) * 1000.0 / f.QuadPart;
+        sum += ms; if (ms > worst) worst = ms;
+    }
+};
+static DWORD g_perfLog = 0;
+
+static void TimingFrameEnd(ID3D11Device* dev, ID3D11DeviceContext* ctx)
+{
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    if (!g_qpf.QuadPart) QueryPerformanceFrequency(&g_qpf);
+    if (g_frameStart.QuadPart)
+    {
+        double ms = (now.QuadPart - g_frameStart.QuadPart) * 1000.0 / g_qpf.QuadPart;
+        g_cpuSum += ms; g_cpuN++;
+        if (ms > g_cpuWorst) g_cpuWorst = ms;
+    }
+    if (g_openTimer >= 0)
+    {
+        GpuTimer& t = g_timers[g_openTimer];
+        ctx->End(t.end);
+        ctx->End(t.disjoint);
+        ctx->Flush(); // send it now; otherwise it waits for Present (after xrWaitFrame) and counts the wait
+        t.pending = true;
+        g_openTimer = -1;
+    }
+    for (GpuTimer& t : g_timers)
+    {
+        if (!t.pending) continue;
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj;
+        if (ctx->GetData(t.disjoint, &dj, sizeof(dj), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+        UINT64 b = 0, e = 0;
+        if (ctx->GetData(t.begin, &b, sizeof(b), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK ||
+            ctx->GetData(t.end, &e, sizeof(e), D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) continue;
+        t.pending = false;
+        if (dj.Disjoint || !dj.Frequency || e < b) continue;
+        double ms = (e - b) * 1000.0 / dj.Frequency;
+        g_gpuSum += ms; g_gpuN++;
+        if (ms > g_gpuWorst) g_gpuWorst = ms;
+    }
+    if (GetTickCount() - g_perfLog > 5000 && (g_gpuN || g_cpuN))
+    {
+        g_perfLog = GetTickCount();
+        Log("[perf] gpu avg %.2f ms worst %.2f (%d frames) | cpu avg %.2f ms worst %.2f | xr wait+submit avg %.2f worst %.2f | present avg %.2f worst %.2f",
+            g_gpuN ? g_gpuSum / g_gpuN : 0.0, g_gpuWorst, g_gpuN, g_cpuN ? g_cpuSum / g_cpuN : 0.0, g_cpuWorst,
+            g_blockN ? g_xrSum / g_blockN : 0.0, g_xrWorst, g_blockN ? g_presentSum / g_blockN : 0.0, g_presentWorst);
+        g_gpuSum = g_gpuWorst = g_cpuSum = g_cpuWorst = 0; g_gpuN = g_cpuN = 0;
+        g_xrSum = g_xrWorst = g_presentSum = g_presentWorst = 0; g_blockN = 0;
+    }
+    (void)dev;
+}
+
+static void TimingFrameStart(ID3D11Device* dev, ID3D11DeviceContext* ctx)
+{
+    QueryPerformanceCounter(&g_frameStart);
+    for (int i = 0; i < 8; ++i)
+    {
+        GpuTimer& t = g_timers[i];
+        if (t.pending) continue;
+        if (!t.disjoint)
+        {
+            D3D11_QUERY_DESC qd = { D3D11_QUERY_TIMESTAMP_DISJOINT, 0 };
+            D3D11_QUERY_DESC qt = { D3D11_QUERY_TIMESTAMP, 0 };
+            if (FAILED(dev->CreateQuery(&qd, &t.disjoint)) || FAILED(dev->CreateQuery(&qt, &t.begin)) ||
+                FAILED(dev->CreateQuery(&qt, &t.end)))
+                return;
+        }
+        ctx->Begin(t.disjoint);
+        ctx->End(t.begin);
+        g_openTimer = i;
+        return;
+    }
+}
+
 static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags)
 {
     uint64_t frame = g_frameCount.fetch_add(1);
+    ID3D11Device* timingDev = nullptr;
+    ID3D11DeviceContext* timingCtx = nullptr;
+    if (SUCCEEDED(This->GetDevice(__uuidof(ID3D11Device), (void**)&timingDev)) && timingDev)
+        timingDev->GetImmediateContext(&timingCtx);
+    if (timingCtx) TimingFrameEnd(timingDev, timingCtx);
     // Eye this finished frame was drawn for (2 = both: double render).
     int renderedEye = Stereo().doubleRender ? 2 : StereoCurrentEye();
     ShadowBypass bypass; // our own context calls below must not be mirrored
-    XrSubmitFrame(This, renderedEye);
+    g_blockN++;
+    { BlockTimer bt(g_xrSum, g_xrWorst); XrSubmitFrame(This, renderedEye); }
     CamOverrideTick(XrSessionActive());
     {
         DXGI_SWAP_CHAIN_DESC scd = {};
@@ -174,7 +278,15 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
 
     // With a headset attached, xrWaitFrame paces us; don't also wait for the monitor.
     if (XrSessionActive()) SyncInterval = 0;
-    return g_realPresent(This, SyncInterval, Flags);
+    HRESULT hr;
+    { BlockTimer bt(g_presentSum, g_presentWorst); hr = g_realPresent(This, SyncInterval, Flags); }
+    if (timingCtx)
+    {
+        TimingFrameStart(timingDev, timingCtx);
+        timingCtx->Release();
+    }
+    if (timingDev) timingDev->Release();
+    return hr;
 }
 
 void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* device, ID3D11DeviceContext* context)

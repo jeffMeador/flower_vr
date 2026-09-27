@@ -3,7 +3,7 @@
 #include "mat4.h"
 #include "stereo.h"
 #include "shadow.h"
-#include <MinHook.h>
+#include "vhook.h"
 #include <d3d11shader.h>
 #include <d3dcompiler.h>
 #include <unordered_map>
@@ -694,30 +694,6 @@ void NotifyCaptureFrameBoundary()
     }
 }
 
-static std::unordered_set<void*> g_hookedTargets;
-
-static bool InlineHook(void* target, void* detour, void** original, const char* name)
-{
-    if (g_hookedTargets.count(target))
-        return true; // same underlying implementation already hooked (shared across instances)
-
-    MH_STATUS st = MH_CreateHook(target, detour, original);
-    if (st != MH_OK && st != MH_ERROR_ALREADY_CREATED)
-    {
-        Log("[capture] MH_CreateHook FAILED for %s at %p: %s", name, target, MH_StatusToString(st));
-        return false;
-    }
-    st = MH_EnableHook(target);
-    if (st != MH_OK && st != MH_ERROR_ENABLED)
-    {
-        Log("[capture] MH_EnableHook FAILED for %s at %p: %s", name, target, MH_StatusToString(st));
-        return false;
-    }
-    g_hookedTargets.insert(target);
-    Log("[capture] inline-hooked %s at %p", name, target);
-    return true;
-}
-
 void InstallCaptureHooks(ID3D11Device* device, ID3D11DeviceContext* context)
 {
     if (!device || !context) return;
@@ -733,18 +709,18 @@ void InstallCaptureHooks(ID3D11Device* device, ID3D11DeviceContext* context)
     void** deviceVT = *reinterpret_cast<void***>(device);
     void** contextVT = *reinterpret_cast<void***>(context);
 
-    InlineHook(deviceVT[12], (void*)&Hook_CreateVertexShader, (void**)&g_realCreateVertexShader, "CreateVertexShader");
-    InlineHook(deviceVT[15], (void*)&Hook_CreatePixelShader, (void**)&g_realCreatePixelShader, "CreatePixelShader");
-    InlineHook(contextVT[9], (void*)&Hook_PSSetShader, (void**)&g_realPSSetShader, "PSSetShader");
-    InlineHook(contextVT[16], (void*)&Hook_PSSetConstantBuffers, (void**)&g_realPSSetConstantBuffers, "PSSetConstantBuffers");
+    HookMethod(deviceVT, 12, (void*)&Hook_CreateVertexShader, (void**)&g_realCreateVertexShader, "CreateVertexShader");
+    HookMethod(deviceVT, 15, (void*)&Hook_CreatePixelShader, (void**)&g_realCreatePixelShader, "CreatePixelShader");
+    HookMethod(contextVT, 9, (void*)&Hook_PSSetShader, (void**)&g_realPSSetShader, "PSSetShader");
+    HookMethod(contextVT, 16, (void*)&Hook_PSSetConstantBuffers, (void**)&g_realPSSetConstantBuffers, "PSSetConstantBuffers");
 
-    InlineHook(contextVT[7], (void*)&Hook_VSSetConstantBuffers, (void**)&g_realVSSetConstantBuffers, "VSSetConstantBuffers");
-    InlineHook(contextVT[11], (void*)&Hook_VSSetShader, (void**)&g_realVSSetShader, "VSSetShader");
-    InlineHook(contextVT[12], (void*)&Hook_DrawIndexed, (void**)&g_realDrawIndexed, "DrawIndexed");
-    InlineHook(contextVT[13], (void*)&Hook_Draw, (void**)&g_realDraw, "Draw");
-    InlineHook(contextVT[14], (void*)&Hook_Map, (void**)&g_realMap, "Map");
-    InlineHook(contextVT[15], (void*)&Hook_Unmap, (void**)&g_realUnmap, "Unmap");
-    InlineHook(contextVT[20], (void*)&Hook_DrawIndexedInstanced, (void**)&g_realDrawIndexedInstanced, "DrawIndexedInstanced");
-    InlineHook(contextVT[21], (void*)&Hook_DrawInstanced, (void**)&g_realDrawInstanced, "DrawInstanced");
-    InlineHook(contextVT[48], (void*)&Hook_UpdateSubresource, (void**)&g_realUpdateSubresource, "UpdateSubresource");
+    HookMethod(contextVT, 7, (void*)&Hook_VSSetConstantBuffers, (void**)&g_realVSSetConstantBuffers, "VSSetConstantBuffers");
+    HookMethod(contextVT, 11, (void*)&Hook_VSSetShader, (void**)&g_realVSSetShader, "VSSetShader");
+    HookMethod(contextVT, 12, (void*)&Hook_DrawIndexed, (void**)&g_realDrawIndexed, "DrawIndexed");
+    HookMethod(contextVT, 13, (void*)&Hook_Draw, (void**)&g_realDraw, "Draw");
+    HookMethod(contextVT, 14, (void*)&Hook_Map, (void**)&g_realMap, "Map");
+    HookMethod(contextVT, 15, (void*)&Hook_Unmap, (void**)&g_realUnmap, "Unmap");
+    HookMethod(contextVT, 20, (void*)&Hook_DrawIndexedInstanced, (void**)&g_realDrawIndexedInstanced, "DrawIndexedInstanced");
+    HookMethod(contextVT, 21, (void*)&Hook_DrawInstanced, (void**)&g_realDrawInstanced, "DrawInstanced");
+    HookMethod(contextVT, 48, (void*)&Hook_UpdateSubresource, (void**)&g_realUpdateSubresource, "UpdateSubresource");
 }
