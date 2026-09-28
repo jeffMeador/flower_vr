@@ -32,6 +32,7 @@ struct StereoConfig
     bool  lensLockPending = false;   // fixed: lock at the next observed strength
     bool  motionBlur = false;        // game motion blur while in VR
     bool  depthOfField = false;      // game depth-of-field blur while in VR
+    float dofNear = 1.0f, dofFar = 1.0f; // with it on: scale of the near/far blur ramps (1 = the game's)
 };
 
 StereoConfig& Stereo();

@@ -6,7 +6,9 @@ shiftEyePosition=0
 lens=off
 worldScale=0.3000
 motionBlur=1
-depthOfField=0
+depthOfField=1
+dofNear=1
+dofFar=0
 
 [debug]
 fakepad=1
@@ -17,7 +19,8 @@ depth=0
 headCamera=1
 
 cameraBack=1.50
-cameraUp=0.45
+cameraUp=0.55
 cameraSide=-0.25
+cameraFlights=1
 maxSquare=2644
 steering=motion

@@ -51,10 +51,13 @@ void StereoLoadConfig(const wchar_t* dllDir)
     g_cfg.doubleRender = _wcsicmp(mode, L"double") == 0;
     g_cfg.motionBlur = ReadIniFloat(L"motionBlur", 0.0f) != 0.0f;
     g_cfg.depthOfField = ReadIniFloat(L"depthOfField", 0.0f) != 0.0f;
+    g_cfg.dofNear = ReadIniFloat(L"dofNear", 1.0f);
+    g_cfg.dofFar = ReadIniFloat(L"dofFar", 1.0f);
     wchar_t lens[32];
     GetPrivateProfileStringW(L"stereo", L"lens", L"game", lens, 32, g_iniPath);
     g_cfg.lensMode = _wcsicmp(lens, L"fixed") == 0 ? 1 : _wcsicmp(lens, L"off") == 0 ? 2 : 0;
-    Log("[stereo] config: motionBlur=%d depthOfField=%d", g_cfg.motionBlur, g_cfg.depthOfField);
+    Log("[stereo] config: motionBlur=%d depthOfField=%d (near blur x%.2f, far blur x%.2f)", g_cfg.motionBlur,
+        g_cfg.depthOfField, g_cfg.dofNear, g_cfg.dofFar);
     Log("[stereo] config: enabled=%d render=%s separation=%.4f worldScale=%.3f shiftEyePosition=%d lens=%d",
         g_cfg.enabled, g_cfg.doubleRender ? "double" : "alternate", g_cfg.separation, g_cfg.worldScale,
         g_cfg.shiftEyePosition, g_cfg.lensMode);

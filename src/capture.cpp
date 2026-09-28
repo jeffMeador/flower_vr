@@ -282,9 +282,11 @@ static HRESULT STDMETHODCALLTYPE Hook_CreatePixelShader(ID3D11Device* self, cons
             std::string n = Lower(vd.Name);
             if (n == "blurzranges")
             {
-                // Depth of field: blur = clamp(max((Z-x)*y, (Z-z)*w)); zero the slopes.
+                // Depth of field: blur = clamp(max((Z-x)*y, (Z-z)*w)): .y is the near
+                // ramp, .w the far one. Off -> both 0; on -> scaled by dofNear/dofFar.
+                // (value: 0 = near entry, 1 = far entry)
                 ov.push_back({ PixelOverride::DepthOfField, bd.BindPoint, vd.StartOffset + 4, 0.0f });
-                ov.push_back({ PixelOverride::DepthOfField, bd.BindPoint, vd.StartOffset + 12, 0.0f });
+                ov.push_back({ PixelOverride::DepthOfField, bd.BindPoint, vd.StartOffset + 12, 1.0f });
                 Log("[capture] pixel shader with depth of field: blurZRanges in slot %u @%u", bd.BindPoint, vd.StartOffset);
             }
             else if (n == "glareint") { glareInt = true; glareSlot = bd.BindPoint; glareOff = vd.StartOffset; }
@@ -608,6 +610,21 @@ static void FinishPrepareDraw(ID3D11DeviceContext* self, ContextState& state, co
     s.patchedKey = key;
     g_statPatched++;
 }
+// Applies one override to a copy of the buffer (true if it changed something).
+static bool PixelOverrideValue(const PixelOverride& o, bool dofOff, bool dofScaled, bool trailsOff, std::vector<uint8_t>& data)
+{
+    float* f = reinterpret_cast<float*>(data.data() + o.offset);
+    if (o.kind == PixelOverride::Trails)
+    {
+        if (!trailsOff) return false;
+        *f = o.value;
+        return true;
+    }
+    if (dofOff) { *f = 0.0f; return true; }
+    if (dofScaled) { *f *= o.value == 0.0f ? Stereo().dofNear : Stereo().dofFar; return true; }
+    return false;
+}
+
 // Pixel-shader constant overrides while in VR (depth of field, glare trails):
 // write the bound buffer with the overridden values. Eye-independent.
 static void PreparePixel(ID3D11DeviceContext* self)
@@ -617,10 +634,11 @@ static void PreparePixel(ID3D11DeviceContext* self)
     if (it == g_psOverrides.end()) return;
     bool vr = StereoPatchKey() != 0;
     bool dofOff = vr && !Stereo().depthOfField;
+    bool dofScaled = vr && Stereo().depthOfField && (Stereo().dofNear != 1.0f || Stereo().dofFar != 1.0f);
     bool trailsOff = vr && !Stereo().motionBlur;
     // Cache tag: this shader's override list (unique address).
     const ShaderOffsets* tag = reinterpret_cast<const ShaderOffsets*>(&it->second);
-    uint64_t wantKey = 1 + (dofOff ? 1 : 0) + (trailsOff ? 2 : 0);
+    uint64_t wantKey = 1 + (dofOff ? 1 : 0) + (trailsOff ? 2 : 0) + (dofScaled ? 4 : 0);
 
     for (UINT slot = 0; slot < 4; ++slot)
     {
@@ -640,9 +658,7 @@ static void PreparePixel(ID3D11DeviceContext* self)
         for (const PixelOverride& o : it->second)
         {
             if (o.slot != slot || o.offset + 4 > patched.size()) continue;
-            bool active = o.kind == PixelOverride::DepthOfField ? dofOff : trailsOff;
-            if (!active) continue;
-            *reinterpret_cast<float*>(patched.data() + o.offset) = o.value;
+            if (!PixelOverrideValue(o, dofOff, dofScaled, trailsOff, patched)) continue;
             any = true;
         }
         if (!any && !ours) continue; // GPU already holds the game's values
@@ -675,6 +691,7 @@ static void PreparePixelRight()
     if (it == g_psOverrides.end()) return;
     bool vr = StereoPatchKey() != 0;
     bool dofOff = vr && !Stereo().depthOfField;
+    bool dofScaled = vr && Stereo().depthOfField && (Stereo().dofNear != 1.0f || Stereo().dofFar != 1.0f);
     bool trailsOff = vr && !Stereo().motionBlur;
     for (UINT slot = 0; slot < 4; ++slot)
     {
@@ -687,8 +704,7 @@ static void PreparePixelRight()
         for (const PixelOverride& o : it->second)
         {
             if (o.slot != slot || o.offset + 4 > patched.size()) continue;
-            if (!(o.kind == PixelOverride::DepthOfField ? dofOff : trailsOff)) continue;
-            *reinterpret_cast<float*>(patched.data() + o.offset) = o.value;
+            if (!PixelOverrideValue(o, dofOff, dofScaled, trailsOff, patched)) continue;
             any = true;
         }
         if (any) MirrorWriteBuffer(buf, patched.data(), (UINT)patched.size(), sh->second.usage);
