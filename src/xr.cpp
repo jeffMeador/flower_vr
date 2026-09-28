@@ -55,7 +55,7 @@ static bool g_recenterPending = false;
 static bool g_depthExt = false;       // XR_KHR_composition_layer_depth enabled on the instance
 // Comfort: in VR the viewpoint sits behind/above the game camera so the lead
 // petal isn't right between the eyes (meters, reference frame; saved to ini).
-static float g_camBack = 1.0f, g_camUp = 0.25f;
+static float g_camBack = 1.0f, g_camUp = 0.25f, g_camSide = 0.0f; // side: + right, - left
 static wchar_t g_iniPath[MAX_PATH] = {};
 static XrSessionState g_state = XR_SESSION_STATE_UNKNOWN;
 static bool g_sessionRunning = false;
@@ -101,7 +101,8 @@ void XrInit(ID3D11Device* device, const wchar_t* dllDir)
     wchar_t buf[32];
     GetPrivateProfileStringW(L"xr", L"cameraBack", L"1.0", buf, 32, ini); g_camBack = (float)_wtof(buf);
     GetPrivateProfileStringW(L"xr", L"cameraUp", L"0.25", buf, 32, ini); g_camUp = (float)_wtof(buf);
-    Log("[xr] camera offset: back %.2f, up %.2f game units", g_camBack, g_camUp);
+    GetPrivateProfileStringW(L"xr", L"cameraSide", L"0", buf, 32, ini); g_camSide = (float)_wtof(buf);
+    Log("[xr] camera offset: back %.2f, up %.2f, side %.2f game units", g_camBack, g_camUp, g_camSide);
 }
 
 static bool LoadLoader()
@@ -1110,7 +1111,7 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
                                  views[e].pose.position.y - g_ref.position.y,
                                  views[e].pose.position.z - g_ref.position.z };
                 XrVector3f p = QRot(refInv, d);
-                float rot[9], pos[3] = { p.x, p.y + g_camUp * camToMeters, p.z + g_camBack * camToMeters };
+                float rot[9], pos[3] = { p.x + g_camSide * camToMeters, p.y + g_camUp * camToMeters, p.z + g_camBack * camToMeters };
                 QToMat(q, rot);
                 StereoSetEyePose(e, rot, pos);
                 g_givenPose[e] = views[e].pose;
@@ -1125,7 +1126,7 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
                                  head.pose.position.y - g_ref.position.y,
                                  head.pose.position.z - g_ref.position.z };
                 XrVector3f p = QRot(refInv, d);
-                float rot[9], pos[3] = { p.x, p.y + g_camUp * camToMeters, p.z + g_camBack * camToMeters };
+                float rot[9], pos[3] = { p.x + g_camSide * camToMeters, p.y + g_camUp * camToMeters, p.z + g_camBack * camToMeters };
                 QToMat(q, rot);
                 StereoSetHeadPose(rot, pos);
             }
