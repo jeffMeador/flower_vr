@@ -379,6 +379,7 @@ static XrSpace g_aimSpace[2] = {};
 static bool g_inputReady = false;
 static bool g_motionSteering = true;
 static bool g_invertStickY = true; // [xr] invertStickY
+static float g_tiltFull = 0.7071f;  // sin of [xr] tiltTurnDegrees (45): roll for a full turn
 
 static XrPath ToPath(const char* s)
 {
@@ -425,6 +426,13 @@ static bool CreateInput()
     GetPrivateProfileStringW(L"xr", L"steering", L"motion", mode, 32, g_iniPath);
     g_motionSteering = _wcsicmp(mode, L"stick") != 0;
     g_invertStickY = GetPrivateProfileIntW(L"xr", L"invertStickY", 1, g_iniPath) != 0;
+    {
+        int deg = (int)GetPrivateProfileIntW(L"xr", L"tiltTurnDegrees", 45, g_iniPath);
+        if (deg < 10) deg = 10;
+        if (deg > 80) deg = 80;
+        g_tiltFull = sinf(deg * 3.14159265f / 180.0f);
+        Log("[xr] tilt to turn: %d degrees for a full turn", deg);
+    }
     Log("[xr] steering: %s (tilt to turn), thumbstick Y %s in levels", g_motionSteering ? "motion" : "stick", g_invertStickY ? "inverted" : "normal");
 
     XrActionSetCreateInfo asci{ XR_TYPE_ACTION_SET_CREATE_INFO };
@@ -609,11 +617,11 @@ static void PollControllers(XrTime time)
         {
             // Like the PS3 tilt controls: roll the controller (tilt left/right)
             // to turn, tilt its nose up/down to climb/dive. Twisting it like a
-            // pointer (yaw) does nothing. 30 degrees = full deflection.
+            // pointer (yaw) does nothing. Full turn at tiltTurnDegrees (45), full climb at 30.
             XrQuaternionf rel = QMul(QConj(neutral[h]), aim[h].orientation);
             XrVector3f f = QRot(rel, { 0, 0, -1 }); // nose
             XrVector3f r = QRot(rel, { 1, 0, 0 });  // right side
-            float mx = -r.y / 0.5f, my = f.y / 0.5f; // sin(30 deg)
+            float mx = -r.y / g_tiltFull, my = f.y / 0.5f; // turn: [xr] tiltTurnDegrees; climb: 30 deg
             Clamp1(mx); Clamp1(my);
             lx = mx; ly = my;
             fromMotion = true;
