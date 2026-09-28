@@ -596,11 +596,23 @@ static void PollControllers(XrTime time)
     // pushed thumbstick overrides motion.
     static bool neutralSet[2] = {};
     static XrQuaternionf neutral[2];
-    static bool wasFlying = false;
+    // "Flying" for motion steering: starts above 30% trigger/grip and only ends
+    // on a full release (a relaxed finger mid-flight still flies in the game, and
+    // used to switch motion steering off: tilting did nothing). "Straight" is
+    // re-captured only when flying starts after a release of at least 0.3 s.
+    static bool flying = false;
+    static DWORD releasedAt = 0;
     bool inLevel = StereoProjectionFresh();
-    bool flying = fly > 0.5f;
-    if (flying && !wasFlying) { neutralSet[0] = neutralSet[1] = false; }
-    wasFlying = flying;
+    if (!flying && fly > 0.3f)
+    {
+        flying = true;
+        if (!releasedAt || GetTickCount() - releasedAt >= 300) neutralSet[0] = neutralSet[1] = false;
+    }
+    else if (flying && fly < 0.05f)
+    {
+        flying = false;
+        releasedAt = GetTickCount();
+    }
 
     float lx = stickX, ly = stickY;
     bool fromMotion = false;

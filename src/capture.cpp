@@ -18,7 +18,7 @@
 // What to do with one cbuffer variable when rendering a given eye.
 // OldClip = previous frame's MVP (motion blur); with motion blur off in VR it's
 // set equal to this frame's (patched) MVP, so nothing appears to move.
-enum class PatchKind { Clip, OldClip, View, EyePos, LensFov };
+enum class PatchKind { Clip, OldClip, View, EyePos, LensFov, PointSize };
 
 struct PatchVar
 {
@@ -188,6 +188,10 @@ static void ReflectAndCacheOffsets(ID3D11VertexShader* shader, const void* bytec
                 offsets.patches.push_back({ PatchKind::LensFov, varDesc.StartOffset });
             else if (n == "r") { offsets.hasLensR = true; offsets.lensROffset = varDesc.StartOffset; }
             else if (n == "maxradius") { offsets.hasLensMaxR = true; offsets.lensMaxROffset = varDesc.StartOffset; }
+            else if (n == "pointsize")
+                // FillerFlower sparkles: screen-space dots (size added in clip
+                // space), which look far too big in the headset. Scaled in VR.
+                offsets.patches.push_back({ PatchKind::PointSize, varDesc.StartOffset });
             else if (n == "eyepositionws")
                 offsets.patches.push_back({ PatchKind::EyePos, varDesc.StartOffset });
             else if (n == "model")
@@ -207,7 +211,7 @@ static void ReflectAndCacheOffsets(ID3D11VertexShader* shader, const void* bytec
     std::vector<PatchVar> kept;
     for (auto& p : offsets.patches)
     {
-        if (p.offset + (p.kind == PatchKind::EyePos ? 12u : p.kind == PatchKind::LensFov ? 4u : 64u) > offsets.cbSize)
+        if (p.offset + (p.kind == PatchKind::EyePos ? 12u : (p.kind == PatchKind::LensFov || p.kind == PatchKind::PointSize) ? 4u : 64u) > offsets.cbSize)
             continue;
         // A lone "fov" without R/maxRadius isn't the lens shader.
         if (p.kind == PatchKind::LensFov && !(offsets.hasLensR && offsets.hasLensMaxR))
@@ -217,8 +221,12 @@ static void ReflectAndCacheOffsets(ID3D11VertexShader* shader, const void* bytec
     offsets.patches.swap(kept);
 
     g_offsets[shader] = offsets;
-    Log("[capture] shader #%d reflected: cbSize=%u model=%d mvp=%d patches=%zu [%s]",
-        offsets.id, offsets.cbSize, offsets.hasModel, offsets.hasMVP, offsets.patches.size(), names.c_str());
+    // DXBC checksum (bytes 4..11) identifies the game's .cso file offline.
+    const uint8_t* bc = static_cast<const uint8_t*>(bytecode);
+    unsigned long long sum = 0;
+    if (len >= 12) memcpy(&sum, bc + 4, 8);
+    Log("[capture] shader #%d reflected: cbSize=%u model=%d mvp=%d patches=%zu [%s] dxbc %016llX",
+        offsets.id, offsets.cbSize, offsets.hasModel, offsets.hasMVP, offsets.patches.size(), names.c_str(), sum);
 }
 
 static HRESULT STDMETHODCALLTYPE Hook_CreateVertexShader(ID3D11Device* self, const void* bytecode, SIZE_T len, ID3D11ClassLinkage* linkage, ID3D11VertexShader** out)
@@ -479,7 +487,7 @@ static bool BuildPatched(const ShaderOffsets& off, const std::vector<uint8_t>& o
     {
         for (const PatchVar& p : off.patches)
         {
-            if (p.offset + (p.kind == PatchKind::EyePos ? 12u : p.kind == PatchKind::LensFov ? 4u : 64u) > patched.size()) continue;
+            if (p.offset + (p.kind == PatchKind::EyePos ? 12u : (p.kind == PatchKind::LensFov || p.kind == PatchKind::PointSize) ? 4u : 64u) > patched.size()) continue;
             float* f = reinterpret_cast<float*>(patched.data() + p.offset);
             switch (p.kind)
             {
@@ -507,6 +515,9 @@ static bool BuildPatched(const ShaderOffsets& off, const std::vector<uint8_t>& o
             case PatchKind::View:
                 StereoPatchView(f);
                 any = true;
+                break;
+            case PatchKind::PointSize:
+                if (Stereo().sparkleSize != 1.0f) { f[0] *= Stereo().sparkleSize; any = true; }
                 break;
             case PatchKind::EyePos:
                 if (eyePos) { f[0] += eyeOff[0]; f[1] += eyeOff[1]; f[2] += eyeOff[2]; any = true; }
@@ -732,10 +743,39 @@ void CaptureRestoreOriginal(ID3D11DeviceContext* ctx, ID3D11Resource* buf)
 
 // Issue one game draw: patched for the current eye (alternate-eye mode), or
 // twice - left eye into the game's targets, right eye into their twins.
+extern wchar_t g_dllDir[MAX_PATH];
+
+// Debug: vertex shader ids listed in vrmod_skipvs.txt (next to the DLL) are
+// not drawn - to find out which shader draws what. Re-read twice a second.
+static std::unordered_set<int> g_skipVS;
+static bool SkippedShader(ID3D11DeviceContext* self)
+{
+    static DWORD lastRead = 0;
+    if (GetTickCount() - lastRead > 500)
+    {
+        lastRead = GetTickCount();
+        wchar_t path[MAX_PATH];
+        swprintf_s(path, L"%s\\vrmod_skipvs.txt", g_dllDir);
+        std::unordered_set<int> ids;
+        FILE* f = nullptr;
+        if (_wfopen_s(&f, path, L"r") == 0 && f)
+        {
+            int id;
+            while (fscanf_s(f, "%d", &id) == 1) ids.insert(id);
+            fclose(f);
+        }
+        if (ids != g_skipVS) { g_skipVS.swap(ids); Log("[capture] skipping %zu vertex shader(s)", g_skipVS.size()); }
+    }
+    if (g_skipVS.empty()) return false;
+    auto it = g_offsets.find(g_contextState[self].currentVS);
+    return it != g_offsets.end() && g_skipVS.count(it->second.id);
+}
+
 template <class F>
 static void StereoDraw(ID3D11DeviceContext* self, F&& draw)
 {
     if (self != g_immediateCtx) { draw(self); return; } // e.g. the mirror's own deferred context
+    if (SkippedShader(self)) return;
     if (!Stereo().doubleRender || ShadowBypassed())
     {
         PrepareDraw(self);
