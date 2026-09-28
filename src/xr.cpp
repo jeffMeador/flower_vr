@@ -666,6 +666,7 @@ static XrPosef g_ref;
 // now, and the ones each swapchain image was actually rendered with.
 static XrPosef g_givenPose[2];
 static bool g_givenValid = false;
+static bool g_fovLogged = false; // per-eye FOV logged once
 static XrPosef g_imagePose[2];
 static bool g_imagePoseValid[2] = {};
 
@@ -1083,6 +1084,14 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
             }
         }
 
+        if (located && !g_fovLogged)
+        {
+            g_fovLogged = true;
+            for (int e = 0; e < 2; ++e)
+                Log("[xr] eye %d fov: left %.1f right %.1f up %.1f down %.1f deg", e,
+                    views[e].fov.angleLeft * 57.2958f, views[e].fov.angleRight * 57.2958f,
+                    views[e].fov.angleUp * 57.2958f, views[e].fov.angleDown * 57.2958f);
+        }
         if (located && g_refSet)
         {
             // Camera offsets are game distances: pre-divide by worldScale, which
