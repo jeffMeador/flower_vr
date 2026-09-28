@@ -18,4 +18,6 @@ headCamera=1
 
 cameraBack=1.00
 cameraUp=0.25
+cameraSide=-0.25
+maxSquare=2644
 steering=motion

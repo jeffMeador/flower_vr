@@ -12,7 +12,14 @@ culling follow the head, motion-controller steering (point + hold to fly),
 floating virtual screen for title/menu, level movies skipped.
 
 Settings the player landed on (see `vrmod.ini.example`): worldScale 0.3 (won a
-blind A/B vs 1.0), lens off, depth of field off, camera 1.0 back / 0.25 up.
+blind A/B vs 1.0), lens off, depth of field off, camera 1.0 back / 0.25 up /
+0.25 left (`cameraSide=-0.25`), steering=motion.
+
+PC quality (RTX 5090, Steam Link to the Frame, 90 Hz = 11.1 ms): with the batched
+double render (`src/mirror.cpp`), 2160 per eye + 4x MSAA takes 4.8 ms of GPU
+(per-draw path: 8.2-9.2 ms); the headset's recommended 2644 per eye + 4x MSAA
+takes 5.3 ms. Use `[xr] maxSquare=2644` with a 2644 square in `vrmod_Flower.cfg`
+(the game picks the display mode after the matching one otherwise).
 
 Solved along the way (see git log for details): matrix convention, culling
 (engine FOV patch + head-turned engine camera), steering feedback loop,
