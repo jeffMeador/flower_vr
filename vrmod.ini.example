@@ -16,8 +16,8 @@ fakepad=1
 depth=0
 headCamera=1
 
-cameraBack=1.00
-cameraUp=0.25
+cameraBack=1.50
+cameraUp=0.45
 cameraSide=-0.25
 maxSquare=2644
 steering=motion

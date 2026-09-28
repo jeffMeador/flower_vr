@@ -60,7 +60,7 @@
         <High Ripple="512" Terrain="1024" Wind="512"/>
         <Ultra Ripple="1024" Terrain="2048" Wind="1024"/>
       </Effects>
-      <Screen Anisotrophy="16" FullScreen="false" Height="2644" MultiSampleCount="4" VSync="true" Width="2644"/>
+      <Screen Anisotrophy="16" FullScreen="false" Height="2644" MultiSampleCount="8" VSync="true" Width="2644"/>
       <System>
         <Lock IB="Dynamic" Tex2D="Staging" VB="Dynamic"/>
         <Cloth Method="Mixed"/>
