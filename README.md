@@ -54,20 +54,31 @@ SteamVR. What it took:
   of GPU time (one eye 4.4 ms); batched, 7.9 ms. Pixel-identical to the left eye
   with zero separation. `[stereo] batch=0` restores the per-draw path.
 
-Measured in level 1 with the headset on the table (`[perf]` log, 72 Hz = 13.9 ms budget):
+Measured in level 1 with the headset on the table (`[perf]` log, 72 Hz = 13.9 ms
+budget; `tools/frame/bench_matrix.sh`). Frames spike ~8 ms above average, so
+averages above ~10 ms stutter in the headset (worn costs about the same):
 
-| Per eye | Grass | GPU |
-|---|---|---|
-| 1440 | Low (256/64 per cell) | 7.9 ms |
-| 1728 | Low | 9.1 ms |
-| 1728 | Medium | 10.1 ms |
+| Per eye | MSAA | Grass density / distance / effects | GPU | Late frames |
+|---|---|---|---|---|
+| 1440 | 1 | Low (256/64) / Low / Low | 7.9 ms | 0% |
+| 1440 | 1 | Medium / Low / Low (aniso 16) | 9.2 ms | 0% |
+| 1440 | 2 | Medium / Low / Low | 11.0 ms | 0.6% (stutters, blurry) |
+| 1440 | 4 | Medium / Low / Low | 13.8 ms | 2.1% |
+| **1600** | **1** | **Medium / Low / Medium** | **10.1 ms** | **0.1% (chosen)** |
+| 1600 | 1 | Ultra / Low / Low | 11.3 ms | 3.5% |
+| 1600 | 1 | Medium / Medium / Low | 11.0 ms | 0.4% |
+| 1728 | 1 | Medium / Low / Low | 10.5 ms | 1–2% (stutters) |
+
+MSAA is expensive here (forcing Turnip's tile mode, `TU_DEBUG=gmem`, is no
+better). The grass blades are geometry (`Grass_fs` outputs vertex color, no
+alpha test), so the remaining shimmer is ordinary sub-pixel aliasing.
 
 Setup on the Frame (Desktop Mode, SSH): game in `~/Games/Flower_GOG` without
 `d3d11_orig.dll`; `tools/frame/run_flower.sh` launches it (no Steam shortcut
 needed), `tools/frame/level1_bench.sh` flies into level 1 and prints timings.
-Settings used: `vrmod_Flower.cfg` 1440x1440, MSAA 1, grass Density/Distance/Effects
-Low, Low GrassPerCell 256 / GrassPerClump 64, Anisotrophy 4; `vrmod.ini`
-`maxSquare=1440`, `motionBlur=0`, `loader=openxr_loader.dll`.
+Settings used: `vrmod_Flower.cfg` 1600x1600, MSAA 1, grass Density Medium, Distance Low, Effects Medium,
+Low GrassPerCell 256 / GrassPerClump 64, Anisotrophy 4; `vrmod.ini`
+`maxSquare=1600`, `motionBlur=0`, `loader=openxr_loader.dll`, `cameraBack=1.00`, `cameraUp=0.25`.
 
 ## Current state (Phase 4) — playable in VR
 
