@@ -639,6 +639,25 @@ static void PollControllers(XrTime time)
             fromMotion = true;
         }
     }
+    else if (h >= 0 && !inLevel && g_motionSteering)
+    {
+        // Menu (pots on the windowsill): tilt left/right against the horizon -
+        // no fly button to capture "straight" here, and a level controller is a
+        // natural rest. 10 degree dead zone so resting hands don't drift the
+        // selection; full at tiltTurnDegrees. A pushed thumbstick wins.
+        bool stickPushed = stickX * stickX + stickY * stickY > 0.25f * 0.25f;
+        if (!stickPushed)
+        {
+            XrVector3f r = QRot(aim[h].orientation, { 1, 0, 0 }); // right side, world space
+            float roll = -r.y, dz = 0.1736f;                        // sin(10 deg)
+            float a = fabsf(roll) > dz ? (fabsf(roll) - dz) / (g_tiltFull - dz) : 0.0f;
+            float mx = roll < 0 ? -a : a;
+            Clamp1(mx);
+            lx = mx;
+            ly = 0.0f;
+            fromMotion = true;
+        }
+    }
     // Thumbstick Y inverted in levels (push up = dive), like a flight stick;
     // not in the menu, where up/down picks the pot. [xr] invertStickY=0 to turn off.
     if (inLevel && g_invertStickY && !fromMotion) ly = -stickY;
