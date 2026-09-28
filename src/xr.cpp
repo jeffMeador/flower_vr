@@ -378,6 +378,7 @@ static XrPath g_hand[2] = {};
 static XrSpace g_aimSpace[2] = {};
 static bool g_inputReady = false;
 static bool g_motionSteering = true;
+static bool g_invertStickY = true; // [xr] invertStickY
 
 static XrPath ToPath(const char* s)
 {
@@ -423,7 +424,8 @@ static bool CreateInput()
     wchar_t mode[32];
     GetPrivateProfileStringW(L"xr", L"steering", L"motion", mode, 32, g_iniPath);
     g_motionSteering = _wcsicmp(mode, L"stick") != 0;
-    Log("[xr] steering: %s", g_motionSteering ? "motion" : "stick");
+    g_invertStickY = GetPrivateProfileIntW(L"xr", L"invertStickY", 1, g_iniPath) != 0;
+    Log("[xr] steering: %s (tilt to turn), thumbstick Y %s in levels", g_motionSteering ? "motion" : "stick", g_invertStickY ? "inverted" : "normal");
 
     XrActionSetCreateInfo asci{ XR_TYPE_ACTION_SET_CREATE_INFO };
     strcpy_s(asci.actionSetName, "flower");
@@ -593,6 +595,7 @@ static void PollControllers(XrTime time)
     wasFlying = flying;
 
     float lx = stickX, ly = stickY;
+    bool fromMotion = false;
     int h = aimOk[1] ? 1 : aimOk[0] ? 0 : -1;
     if (h >= 0 && inLevel && flying)
     {
@@ -604,12 +607,21 @@ static void PollControllers(XrTime time)
         bool stickPushed = stickX * stickX + stickY * stickY > 0.25f * 0.25f;
         if (g_motionSteering && !stickPushed)
         {
-            XrVector3f f = QRot(QMul(QConj(neutral[h]), aim[h].orientation), { 0, 0, -1 });
-            float mx = f.x / 0.5f, my = f.y / 0.5f; // sin(30 deg) = full deflection
+            // Like the PS3 tilt controls: roll the controller (tilt left/right)
+            // to turn, tilt its nose up/down to climb/dive. Twisting it like a
+            // pointer (yaw) does nothing. 30 degrees = full deflection.
+            XrQuaternionf rel = QMul(QConj(neutral[h]), aim[h].orientation);
+            XrVector3f f = QRot(rel, { 0, 0, -1 }); // nose
+            XrVector3f r = QRot(rel, { 1, 0, 0 });  // right side
+            float mx = -r.y / 0.5f, my = f.y / 0.5f; // sin(30 deg)
             Clamp1(mx); Clamp1(my);
             lx = mx; ly = my;
+            fromMotion = true;
         }
     }
+    // Thumbstick Y inverted in levels (push up = dive), like a flight stick;
+    // not in the menu, where up/down picks the pot. [xr] invertStickY=0 to turn off.
+    if (inLevel && g_invertStickY && !fromMotion) ly = -stickY;
 
     // Diagnostics: which controller type SteamVR reports, and live values.
     static DWORD lastDiag = 0;

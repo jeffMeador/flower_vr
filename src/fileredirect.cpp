@@ -21,6 +21,7 @@ static CreateFileW_t realCreateFileW;
 static CreateFileA_t realCreateFileA;
 static std::wstring g_cfgTarget;     // empty = no settings redirect
 static std::wstring g_overrideDir;   // empty = no overrides folder
+static bool g_cameraFlights = false; // [xr] cameraFlights=1: skip the camera-grab (trigger) overrides
 static bool g_loggedCfg = false;
 
 static bool EndsWithI(const wchar_t* path, const wchar_t* suffix)
@@ -40,6 +41,7 @@ static bool EndsWithI(const wchar_t* path, const wchar_t* suffix)
 static std::wstring OverrideFor(const wchar_t* path)
 {
     if (g_overrideDir.empty()) return {};
+    if (g_cameraFlights && EndsWithI(path, L"\\TriggerInstances.lua")) return {};
     std::wstring p(path);
     for (auto& c : p) if (c == L'/') c = L'\\';
     std::wstring lower = p;
@@ -105,6 +107,9 @@ bool FileRedirectInstall(const wchar_t* gameDir)
     bool haveDir = da != INVALID_FILE_ATTRIBUTES && (da & FILE_ATTRIBUTE_DIRECTORY);
     if (haveCfg) g_cfgTarget = cfg; else Log("[redirect] no vrmod_Flower.cfg; using the normal settings file");
     if (haveDir) { g_overrideDir = dir; Log("[redirect] data overrides from %ls", dir.c_str()); }
+    std::wstring ini = std::wstring(gameDir) + L"\\vrmod.ini";
+    g_cameraFlights = GetPrivateProfileIntW(L"xr", L"cameraFlights", 0, ini.c_str()) != 0;
+    if (g_cameraFlights) Log("[redirect] cameraFlights=1: the game's camera flights stay on");
     if (!haveCfg && !haveDir) return false;
 
     MH_Initialize(); // harmless if already initialized
