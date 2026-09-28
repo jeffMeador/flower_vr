@@ -28,6 +28,14 @@ Solved along the way (see git log for details): matrix convention, culling
 firing several times per press, world scale collapsing.
 
 Known issues / open:
+- Sparkle fields (glow sprites in the grass) look 2-3x too big in the headset.
+  They keep a constant on-screen size, likely scaled by the game camera's FOV,
+  which the mod widens to 125 deg for culling. Test next: [xr] gameFov=100
+  (no performance cost measured) and compare the same spot.
+- The chase camera still turns toward flower patches on its own; planned fix: a
+  mod-side heading that follows the flight direction (steering relative to it).
+- Steering sometimes seems to ignore input - check whether it coincides with
+  the game's camera flights ([xr] cameraFlights).
 - Viewpoint can still dip into terrain on slopes (terrain-aware clamp in
   progress: `src/terrain.cpp`, reads the level heightmap).
 - Level movies are black even without the mod (game/Windows video

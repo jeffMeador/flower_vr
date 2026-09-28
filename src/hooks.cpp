@@ -271,6 +271,18 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
     static int dumpRemaining = 0;
     if (KeyEdge(VK_F12))
         dumpRemaining = 2;
+    // Remote trigger (hotkeys need the game in focus): a file named vrmod_dump
+    // next to the DLL dumps the next frame's eyes and is removed.
+    if ((frame % 30) == 0)
+    {
+        wchar_t trig[MAX_PATH];
+        swprintf_s(trig, L"%s\\vrmod_dump", g_dllDir);
+        if (GetFileAttributesW(trig) != INVALID_FILE_ATTRIBUTES && DeleteFileW(trig))
+        {
+            dumpRemaining = 1;
+            Log("[dump] requested by file");
+        }
+    }
     if (frame < 2 || dumpRemaining > 0)
     {
         DumpBackbufferBMP(This, frame);
