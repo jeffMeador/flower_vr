@@ -5,6 +5,7 @@
 #include "stereo.h"
 #include "fileredirect.h"
 #include "displaymodes.h"
+#include "defaults.h"
 
 HMODULE g_realD3D11 = nullptr;
 wchar_t g_dllDir[MAX_PATH] = {};
@@ -54,6 +55,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
         wchar_t realPath[MAX_PATH] = L"(none)";
         if (g_realD3D11) GetModuleFileNameW(g_realD3D11, realPath, MAX_PATH);
         Log("VRMod proxy d3d11.dll attached. real d3d11: %ls", realPath);
+        EnsureDefaultSettings(g_dllDir); // before any setting is read
         StereoLoadConfig(g_dllDir);
         if (!HooksPassthrough() && FileRedirectInstall(g_dllDir))
             DisplayModesInstall(g_dllDir); // let the VR config's square resolution be accepted

@@ -1,0 +1,24 @@
+Flower VR - unofficial VR mod for Flower (PC, GOG version)
+https://github.com/jeffMeador/flower_vr
+
+Install
+1. Unzip everything into your Flower game folder, next to Flower.exe.
+2. Double-click install.bat. It copies your own Windows d3d11.dll next to the
+   mod as d3d11_orig.dll, creates vrmod.ini and vrmod_Flower.cfg from the
+   examples, and skips the level movies.
+3. Start SteamVR with your headset connected, then launch Flower.exe.
+
+Controls: hold the trigger/grip/A/X to fly; tilt the controller left/right to
+turn and nose up/down to climb. Quit from the game's pause menu or window.
+
+Settings are in vrmod.ini; see the README on GitHub for what each one does.
+The default quality (2644 x 2644 per eye, 8x MSAA) needs a high-end GPU: lower
+Width/Height (keep them equal, and set maxSquare in vrmod.ini to match) and
+MultiSampleCount in vrmod_Flower.cfg for weaker cards.
+
+Uninstall: delete d3d11.dll, d3d11_orig.dll, vrmod.ini, vrmod_Flower.cfg,
+vrmod.log and the vrmod_overrides folder.
+
+Never share d3d11_orig.dll: it's Microsoft's file from your own Windows.
+Fan project, not affiliated with thatgamecompany or Annapurna Interactive.
+License: MIT (LICENSE.txt); MinHook: BSD 2-Clause (MinHook-LICENSE.txt).

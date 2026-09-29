@@ -32,7 +32,7 @@ Fan project, not affiliated with or endorsed by thatgamecompany or Annapurna Int
    - builds `d3d11.dll` (the mod) and copies it into the game folder,
    - copies your own `C:\Windows\System32\d3d11.dll` next to it as `d3d11_orig.dll` (the real Direct3D, which the mod forwards to; never share this file),
    - generates the override folder `vrmod_overrides` from your copy of the game (movie skip).
-2. **Settings.** Copy `vrmod.ini.example` to `<game folder>\vrmod.ini` and `vrmod_Flower.cfg.example` to `<game folder>\vrmod_Flower.cfg`. The latter is the game's own settings file for VR (square resolution, MSAA, grass); your normal `Documents\Flower\Flower.cfg` is left alone.
+2. **Settings.** Copy `vrmod.ini.example` to `<game folder>\vrmod.ini` and `vrmod_Flower.cfg.example` to `<game folder>\vrmod_Flower.cfg`. The latter is the game's own settings file for VR (square resolution, MSAA, grass); your normal `Documents\Flower\Flower.cfg` is left alone. If you skip this step, the mod creates both on first launch: `vrmod.ini` with the recommended settings but a 2160 square, and `vrmod_Flower.cfg` as a copy of your normal settings with a windowed square screen at `maxSquare`, 4x MSAA.
 3. **Play.** Start SteamVR with the headset connected, then launch `Flower.exe` from the game folder.
 
 **Uninstall:** delete `d3d11.dll`, `d3d11_orig.dll`, `vrmod.ini`, `vrmod_Flower.cfg`, `vrmod.log` and the `vrmod_overrides` folder from the game folder.
