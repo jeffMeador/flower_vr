@@ -2,6 +2,8 @@
 
 An unofficial VR mod for the PC version of [Flower](https://thatgamecompany.com/flower/) (thatgamecompany, 2009/2019): full stereo 3D, head tracking and motion controls, played through SteamVR.
 
+**[Watch it in action on YouTube](https://youtu.be/A30Fg2g_Vfo)**
+
 You fly as the wind, with the petals just ahead of you; turning your head looks around the world, and tilting the controller steers, like the original PS3 tilt controls.
 
 Fan project, not affiliated with or endorsed by thatgamecompany or Annapurna Interactive. You need your own copy of the game.
