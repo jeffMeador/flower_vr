@@ -37,16 +37,15 @@ Fan project, not affiliated with or endorsed by thatgamecompany or Annapurna Int
 
 | Control | Action |
 |---|---|
-| Hold trigger, grip, A or X | Fly |
+| Hold trigger, grip, A or X | Fly (full speed past about a third of a press) |
 | Tilt controller left / right | Turn (full turn at 45 degrees) |
-| Tilt nose up / down | Climb / dive |
+| Tilt nose up / down | Climb / dive (full at 30 degrees from your rest angle) |
 | Thumbstick | Steer (pushed up = dive in levels) |
-| Thumbstick click | Re-center "straight" for the tilt controls |
 | Hold B or Y for 1 s | Switch between motion and thumbstick steering |
 | Menu button | Pause |
 | In the menu | Tilt to pick a level, trigger to choose |
 
-"Straight" is whatever angle the controller is at when you start flying; if steering feels lopsided (one direction weaker), click the thumbstick while holding the controller level to re-center.
+Tilt is measured against the horizon, like the PS3 controls: holding the controller level means straight, so there is nothing to reset. If you naturally hold it nose-down, set `pitchRestDegrees` (e.g. -10) so that feels like level flight.
 
 **To quit, use the game's pause menu.** Don't force-close the game while it's running in VR.
 
@@ -67,6 +66,7 @@ Keyboard hotkeys (only while the game window has focus): F6 recenter the view, `
 | `[xr] cameraFlights` | 1 | 0 stops the game's scripted camera flights to viewpoints (they're part of the game's storytelling, so they're on by default). |
 | `[xr] steering` | motion | `motion` or `stick`. |
 | `[xr] tiltTurnDegrees` | 45 | Controller tilt for a full turn. |
+| `[xr] pitchRestDegrees` | 0 | Nose angle that counts as straight for climbing (negative = nose down). |
 | `[xr] invertStickY` | 1 | Thumbstick up = dive in levels. |
 | `[xr] maxSquare` | 2644 | Must match the square resolution in `vrmod_Flower.cfg`. |
 
@@ -100,7 +100,6 @@ The full engineering log is in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 - The game's chase camera sometimes swings toward flower patches on its own, which can be disorienting.
 - The first title card ("originally released on PlayStation") is cut off at the sides.
 - The flower's own sparkles are still fairly large.
-- Tilt steering is relative to the angle you start flying at, so one direction can feel weaker until you re-center (thumbstick click).
 - Tested on one setup (RTX 5090, Steam Frame via Steam Link).
 
 ## License

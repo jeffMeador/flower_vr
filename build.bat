@@ -1,7 +1,8 @@
 @echo off
 setlocal
 
-set GAMEDIR=%USERPROFILE%\Desktop\Flower_GOG
+rem Game folder to deploy to: set GAMEDIR before running to override.
+if not defined GAMEDIR set GAMEDIR=%USERPROFILE%\Desktop\Flower_GOG
 
 call "C:\Program Files (x86)\Microsoft Visual Studio\2017\Community\VC\Auxiliary\Build\vcvars64.bat" >nul
 if errorlevel 1 (

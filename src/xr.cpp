@@ -379,6 +379,7 @@ static XrSpace g_aimSpace[2] = {};
 static bool g_inputReady = false;
 static bool g_motionSteering = true;
 static bool g_invertStickY = true; // [xr] invertStickY
+static float g_pitchRest = 0.0f;    // sin of [xr] pitchRestDegrees: nose angle that means "straight" (negative = nose down)
 static float g_tiltFull = 0.7071f;  // sin of [xr] tiltTurnDegrees (45): roll for a full turn
 
 static XrPath ToPath(const char* s)
@@ -432,6 +433,11 @@ static bool CreateInput()
         if (deg > 80) deg = 80;
         g_tiltFull = sinf(deg * 3.14159265f / 180.0f);
         Log("[xr] tilt to turn: %d degrees for a full turn", deg);
+        int rest = (int)GetPrivateProfileIntW(L"xr", L"pitchRestDegrees", 0, g_iniPath);
+        if (rest < -60) rest = -60;
+        if (rest > 60) rest = 60;
+        g_pitchRest = sinf(rest * 3.14159265f / 180.0f);
+        Log("[xr] pitch rest angle: %d degrees", rest);
     }
     Log("[xr] steering: %s (tilt to turn), thumbstick Y %s in levels", g_motionSteering ? "motion" : "stick", g_invertStickY ? "inverted" : "normal");
 
@@ -588,54 +594,44 @@ static void PollControllers(XrTime time)
         Log("[xr] steering switched to %s", g_motionSteering ? "motion" : "stick");
     }
 
-    // Motion steering: the right hand (left if the right isn't tracked), only
-    // in a 3D level (the menu expects no stick input to settle on a pot).
-    // Pressing a fly button sets "straight" to wherever the controller points
-    // at that moment, and pointing steers while it's held - like the grip
-    // version, on the fly buttons. Thumbstick click re-centers mid-hold; a
-    // pushed thumbstick overrides motion.
-    static bool neutralSet[2] = {};
-    static XrQuaternionf neutral[2];
-    // "Flying" for motion steering: starts above 30% trigger/grip and only ends
-    // on a full release (a relaxed finger mid-flight still flies in the game, and
-    // used to switch motion steering off: tilting did nothing). "Straight" is
-    // re-captured only when flying starts after a release of at least 0.3 s.
+    // Motion steering (right hand, left if the right isn't tracked), like the
+    // PS3 tilt controls: both axes are measured against the horizon, so there is
+    // nothing to capture or reset - a captured "straight" left one direction weak
+    // whenever it was taken with the hand tilted.
+    //  - Turn: roll (tilt left/right); level = straight; full at tiltTurnDegrees.
+    //  - Climb: nose up/down around pitchRestDegrees (the angle you naturally hold
+    //    it at); full at 30 degrees from it.
+    //  - 3 degree dead zone on both. Twisting it like a pointer (yaw) does nothing.
+    //  - A clearly pushed thumbstick (40%) takes over.
+    // "Flying" starts above 30% trigger/grip and ends only on a full release.
     static bool flying = false;
-    static DWORD releasedAt = 0;
     bool inLevel = StereoProjectionFresh();
-    if (!flying && fly > 0.3f)
-    {
-        flying = true;
-        if (!releasedAt || GetTickCount() - releasedAt >= 300) neutralSet[0] = neutralSet[1] = false;
-    }
-    else if (flying && fly < 0.05f)
-    {
-        flying = false;
-        releasedAt = GetTickCount();
-    }
+    if (!flying && fly > 0.3f) flying = true;
+    else if (flying && fly < 0.05f) flying = false;
+    (void)recenter; // the thumbstick click has nothing to re-center any more
 
     float lx = stickX, ly = stickY;
     bool fromMotion = false;
+    float rollDeg = 0, pitchDeg = 0;
     int h = aimOk[1] ? 1 : aimOk[0] ? 0 : -1;
     if (h >= 0 && inLevel && flying)
     {
-        if (recenter || !neutralSet[h])
-        {
-            neutral[h] = aim[h].orientation;
-            neutralSet[h] = true;
-        }
-        bool stickPushed = stickX * stickX + stickY * stickY > 0.25f * 0.25f;
+        XrVector3f nose = QRot(aim[h].orientation, { 0, 0, -1 }); // world space
+        XrVector3f right = QRot(aim[h].orientation, { 1, 0, 0 });
+        rollDeg = asinf(fmaxf(-1.0f, fminf(1.0f, -right.y))) * 57.2958f;
+        pitchDeg = asinf(fmaxf(-1.0f, fminf(1.0f, nose.y))) * 57.2958f;
+        bool stickPushed = stickX * stickX + stickY * stickY > 0.4f * 0.4f;
         if (g_motionSteering && !stickPushed)
         {
-            // Like the PS3 tilt controls: roll the controller (tilt left/right)
-            // to turn, tilt its nose up/down to climb/dive. Twisting it like a
-            // pointer (yaw) does nothing. Full turn at tiltTurnDegrees (45), full climb at 30.
-            XrQuaternionf rel = QMul(QConj(neutral[h]), aim[h].orientation);
-            XrVector3f f = QRot(rel, { 0, 0, -1 }); // nose
-            XrVector3f r = QRot(rel, { 1, 0, 0 });  // right side
-            float mx = -r.y / g_tiltFull, my = f.y / 0.5f; // turn: [xr] tiltTurnDegrees; climb: 30 deg
-            Clamp1(mx); Clamp1(my);
-            lx = mx; ly = my;
+            const float dz = 0.0523f; // sin(3 deg)
+            auto shape = [dz](float v, float full)
+            {
+                float a = fabsf(v) > dz ? (fabsf(v) - dz) / (full - dz) : 0.0f;
+                if (a > 1.0f) a = 1.0f;
+                return v < 0 ? -a : a;
+            };
+            lx = shape(-right.y, g_tiltFull);
+            ly = shape(nose.y - g_pitchRest, 0.5f); // sin(30 deg)
             fromMotion = true;
         }
     }
@@ -677,14 +673,19 @@ static void PollControllers(XrTime time)
                 xrPathToString_(g_instance, ps.interactionProfile, XR_MAX_PATH_LENGTH, &n, prof[i]);
             }
         }
-        Log("[xr] controllers: left=%s right=%s | %s steering | out stick (%.2f %.2f) fly %.2f menu=%d",
-            prof[0], prof[1], g_motionSteering ? "motion" : "stick", lx, ly, fly, menu);
+        Log("[xr] controllers: left=%s right=%s | %s steering | out stick (%.2f %.2f) fly %.2f menu=%d | roll %.0f pitch %.0f deg",
+            prof[0], prof[1], g_motionSteering ? "motion" : "stick", lx, ly, fly, menu, rollDeg, pitchDeg);
     }
 
+    // Flying is on/off in levels, like the original's buttons: full speed while
+    // flying (a relaxed finger used to slow the flower via the analog trigger).
+    // In the menu the trigger works as before (half-press selects).
+    bool flyOut = inLevel ? flying : fly > 0.5f;
     WORD buttons = 0;
-    if (fly > 0.5f) buttons |= XINPUT_GAMEPAD_A;
+    if (flyOut) buttons |= XINPUT_GAMEPAD_A;
     if (menu) buttons |= XINPUT_GAMEPAD_START;
-    FakePadSetXR(lx, ly, buttons, 0, (BYTE)(fly * 255.0f));
+    BYTE rt = inLevel ? (flying ? (BYTE)255 : (BYTE)0) : (BYTE)(fly * 255.0f);
+    FakePadSetXR(lx, ly, buttons, 0, rt);
 }
 
 // ---- small quaternion helpers (x, y, z, w) ----
