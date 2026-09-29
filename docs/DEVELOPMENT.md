@@ -6,7 +6,7 @@ Goal: add real stereoscopic, head-tracked VR to the 2020 PC/Steam build of
 Flower by hooking its DirectX 11 layer from outside the engine (no PhyreEngine
 source available or needed). See git log for phase-by-phase history.
 
-## Milestone 1 (tag `milestone-1`) — fully playable in VR
+## Milestone 1 — fully playable in VR
 
 Level 1 played end to end on a Steam Frame (SteamVR via Steam Link, RTX 5090):
 stereo, head-tracked, both eyes at 90 fps (2160² per eye, 4x MSAA), grass and
@@ -51,7 +51,7 @@ Known issues / open:
   9 readers (Flower.exe+0x39CBC looks most like GOG's steering math), but telling
   them apart needs stick input, which the game only takes with its window focused.
 
-## Steam Frame, standalone (branch `frame-port`)
+## Steam Frame, standalone
 
 The GOG build runs on the headset itself (Snapdragon 8 Gen 3, SteamOS) through
 Proton 11 (ARM64) + FEX, with VR through Proton's `wineopenxr` into the Frame's
