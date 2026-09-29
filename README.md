@@ -28,10 +28,6 @@ Fan project, not affiliated with or endorsed by thatgamecompany or Annapurna Int
 
 ## Install
 
-**From the release zip (no build tools needed):** download `FlowerVR-1.0.zip` from [Releases](https://github.com/jeffMeador/flower_vr/releases), unzip everything into your Flower folder next to `Flower.exe`, and double-click `install.bat`. Then start SteamVR with the headset connected and launch `Flower.exe`.
-
-**From source:**
-
 1. **Build and deploy.** Edit `GAMEDIR` at the top of `build.bat` to your Flower (GOG) folder, then run `build.bat` from this folder. It:
    - builds `d3d11.dll` (the mod) and copies it into the game folder,
    - copies your own `C:\Windows\System32\d3d11.dll` next to it as `d3d11_orig.dll` (the real Direct3D, which the mod forwards to; never share this file),
