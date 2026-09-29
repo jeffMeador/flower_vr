@@ -11,7 +11,7 @@ dofNear=1
 dofFar=0
 
 [debug]
-fakepad=1
+fakepad=0
 
 
 [xr]
