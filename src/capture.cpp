@@ -71,12 +71,34 @@ struct ContextState
 // (blurZRanges slopes -> 0) and glare trails (glare history off).
 struct PixelOverride
 {
-    enum Kind { DepthOfField, Trails } kind;
+    enum Kind { DepthOfField, Trails, Fixed } kind; // Fixed: [psoverride] name=value from vrmod.ini
     UINT slot;
     UINT offset;
     float value;
 };
 static std::unordered_map<ID3D11PixelShader*, std::vector<PixelOverride>> g_psOverrides;
+
+// [psoverride] in vrmod.ini: <constant name>=<float>, lower-cased names. Pins any
+// pixel-shader constant while in stereo (for tuning another game's effects).
+static std::unordered_map<std::string, float> LoadFixedOverrides()
+{
+    std::unordered_map<std::string, float> m;
+    wchar_t ini[MAX_PATH];
+    extern wchar_t g_dllDir[MAX_PATH];
+    swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
+    wchar_t buf[4096] = {};
+    DWORD n = GetPrivateProfileSectionW(L"psoverride", buf, 4096, ini);
+    for (const wchar_t* p = buf; p < buf + n && *p; p += wcslen(p) + 1)
+    {
+        const wchar_t* eq = wcschr(p, L'=');
+        if (!eq) continue;
+        std::string name;
+        for (const wchar_t* c = p; c < eq; ++c) name += (char)towlower(*c);
+        m[name] = (float)_wtof(eq + 1);
+        Log("[capture] psoverride %s = %g", name.c_str(), m[name]);
+    }
+    return m;
+}
 static std::unordered_map<ID3D11DeviceContext*, ContextState> g_contextState;
 
 static std::atomic<uint64_t> g_captureFrame{ 0 };
@@ -288,6 +310,10 @@ static HRESULT STDMETHODCALLTYPE Hook_CreatePixelShader(ID3D11Device* self, cons
             cbr->GetVariableByIndex(v)->GetDesc(&vd);
             if (!(vd.uFlags & D3D_SVF_USED)) continue;
             std::string n = Lower(vd.Name);
+            static const std::unordered_map<std::string, float> fixed = LoadFixedOverrides();
+            auto fx = fixed.find(n);
+            if (fx != fixed.end())
+                ov.push_back({ PixelOverride::Fixed, bd.BindPoint, vd.StartOffset, fx->second });
             if (n == "blurzranges")
             {
                 // Depth of field: blur = clamp(max((Z-x)*y, (Z-z)*w)): .y is the near
@@ -625,6 +651,7 @@ static void FinishPrepareDraw(ID3D11DeviceContext* self, ContextState& state, co
 static bool PixelOverrideValue(const PixelOverride& o, bool dofOff, bool dofScaled, bool trailsOff, std::vector<uint8_t>& data)
 {
     float* f = reinterpret_cast<float*>(data.data() + o.offset);
+    if (o.kind == PixelOverride::Fixed) { *f = o.value; return true; }
     if (o.kind == PixelOverride::Trails)
     {
         if (!trailsOff) return false;
