@@ -43,13 +43,14 @@ Known issues / open:
 - Level movies are black even without the mod (game/Windows video
   playback); they're turned off by a `MovieBarn.lua` override that
   `build.bat` generates from the game's own file (`tools/make_overrides.ps1`).
-- Steam build: different compile. Patch sites are found by pattern now; the
-  camera patch resolves on Steam (+0x3EC2E), the steering site doesn't yet, so the
-  head-turned camera stays off there. The virtual gamepad does reach it (the
-  automated run flew into level 1; an earlier "Steam Input blocks it" finding was
-  wrong). Open: find its steering code. The camera-matrix watch (Shift+F7) lists
-  9 readers (Flower.exe+0x39CBC looks most like GOG's steering math), but telling
-  them apart needs stick input, which the game only takes with its window focused.
+- Steam build: different compile, now supported. Patch sites are found by
+  pattern: camera at Steam +0x3EC2E, steering at +0xE5E4F. The steering
+  function was found offline by comparing every Steam function's instruction
+  sequence with GOG's (0.90 similarity, the next best 0.34); there the four
+  matrix loads are folded into `mulps xmm,[rcx+90h..C0h]`, so each build's
+  signature carries its own re-encoded loads for the stub (and the saved
+  matrix is 16-byte aligned for mulps). Played in VR from Steam; it feels the
+  same as GOG.
 
 ## Steam Frame, standalone
 

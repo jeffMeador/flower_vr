@@ -45,7 +45,7 @@ static bool g_headCamera = false; // [xr] headCamera: turn engine camera with th
 static bool g_terrainClamp = false; // [xr] terrainClamp: keep the viewpoint above ground (experimental)
 
 // Gameplay must keep seeing the un-turned camera: the steering code converts
-// stick input to a world direction with it (Flower.exe+0x10B30F..0x10B32B,
+// stick input to a world direction with it (GOG Flower.exe+0x10B30F..0x10B32B,
 // found with camfind F4 - it only runs while there is input). Turning it by
 // the head reversed the controls and fed back into the chase camera (spin).
 // Those four loads (28 bytes) are patched to jump to a stub that loads the
@@ -59,12 +59,26 @@ struct SteerSignature
     const char* build;
     std::vector<int> bytes;
     int startOffset; // first of the four matrix loads (28 bytes, replaced)
+    std::vector<uint8_t> loads; // the same four loads re-encoded with [rax] as the matrix (run by the stub)
 };
 static const std::vector<SteerSignature> kSteerSigs = {
     // GOG: movups xmm6,[rcx+90h] / xmm3,[rcx+A0h] / xmm5,[rcx+B0h] / xmm7,[rcx+C0h]; lea rcx,[rsp+70h]
     { "GOG", { 0x0F, 0x10, 0xB1, 0x90, 0x00, 0x00, 0x00, 0x0F, 0x10, 0x99, 0xA0, 0x00, 0x00, 0x00,
                0x0F, 0x10, 0xA9, 0xB0, 0x00, 0x00, 0x00, 0x0F, 0x10, 0xB9, 0xC0, 0x00, 0x00, 0x00,
-               0x48, 0x8D, 0x4C, 0x24, 0x70 }, 0 },
+               0x48, 0x8D, 0x4C, 0x24, 0x70 }, 0,
+      { 0x0F, 0x10, 0x30,          // movups xmm6,[rax]
+        0x0F, 0x10, 0x58, 0x10,    // movups xmm3,[rax+10h]
+        0x0F, 0x10, 0x68, 0x20,    // movups xmm5,[rax+20h]
+        0x0F, 0x10, 0x78, 0x30 } },// movups xmm7,[rax+30h]
+    // Steam: the loads are folded into the multiplies (same function, Flower.exe+0xE5E4F):
+    // mulps xmm0,[rcx+90h] / xmm1,[rcx+C0h] / xmm3,[rcx+B0h] / xmm2,[rcx+A0h]; lea rcx,[rsp+70h]
+    { "Steam", { 0x0F, 0x59, 0x81, 0x90, 0x00, 0x00, 0x00, 0x0F, 0x59, 0x89, 0xC0, 0x00, 0x00, 0x00,
+                 0x0F, 0x59, 0x99, 0xB0, 0x00, 0x00, 0x00, 0x0F, 0x59, 0x91, 0xA0, 0x00, 0x00, 0x00,
+                 0x48, 0x8D, 0x4C, 0x24, 0x70 }, 0,
+      { 0x0F, 0x59, 0x00,          // mulps xmm0,[rax]
+        0x0F, 0x59, 0x48, 0x30,    // mulps xmm1,[rax+30h]
+        0x0F, 0x59, 0x58, 0x20,    // mulps xmm3,[rax+20h]
+        0x0F, 0x59, 0x50, 0x10 } },// mulps xmm2,[rax+10h]
 };
 static const int kSteerLoadsSize = 28;
 static uint8_t* g_steerStart = nullptr;
@@ -96,14 +110,14 @@ static uint8_t* FindInExe(const std::vector<int>& pat, const char* what)
 }
 
 static float* volatile g_camMatrix = nullptr; // node+0x90 of the camera we turned (read by the steering stub)
-static float g_origMatrix[16];                // its un-turned matrix this frame
+alignas(16) static float g_origMatrix[16];    // its un-turned matrix this frame (aligned: Steam's mulps reads it)
 static volatile LONG g_steerSwaps = 0;
 
 static void Emit(uint8_t*& p, std::initializer_list<uint8_t> bytes) { for (uint8_t b : bytes) *p++ = b; }
 static void Emit64(uint8_t*& p, uint64_t v) { memcpy(p, &v, 8); p += 8; }
 
 // Replaces the steering code's four matrix loads with a jump to a stub.
-static bool PatchSteering(uint8_t* site, uint8_t* stub)
+static bool PatchSteering(uint8_t* site, uint8_t* stub, const std::vector<uint8_t>& loads)
 {
     uint8_t* p = stub;
     Emit(p, { 0x9C, 0x50, 0x52 });                           // pushfq; push rax; push rdx
@@ -115,10 +129,7 @@ static bool PatchSteering(uint8_t* site, uint8_t* stub)
     Emit(p, { 0x48, 0xBA }); Emit64(p, (uint64_t)&g_steerSwaps); // mov rdx,&g_steerSwaps
     Emit(p, { 0xF0, 0xFF, 0x02 });                           // lock inc dword [rdx]
     // loads:
-    Emit(p, { 0x0F, 0x10, 0x30 });                           // movups xmm6,[rax]
-    Emit(p, { 0x0F, 0x10, 0x58, 0x10 });                     // movups xmm3,[rax+10h]
-    Emit(p, { 0x0F, 0x10, 0x68, 0x20 });                     // movups xmm5,[rax+20h]
-    Emit(p, { 0x0F, 0x10, 0x78, 0x30 });                     // movups xmm7,[rax+30h]
+    for (uint8_t b : loads) *p++ = b;                        // the build's four loads, from [rax]
     Emit(p, { 0x5A, 0x58, 0x9D });                           // pop rdx; pop rax; popfq
     Emit(p, { 0xFF, 0x25, 0, 0, 0, 0 }); Emit64(p, (uint64_t)(site + kSteerLoadsSize)); // jmp back
 
@@ -142,7 +153,7 @@ static void LocateSteering(uint8_t* stub)
     {
         if (uint8_t* p = FindInExe(sig.bytes, sig.build))
         {
-            if (!PatchSteering(p + sig.startOffset, stub)) break;
+            if (!PatchSteering(p + sig.startOffset, stub, sig.loads)) break;
             g_steerStart = p + sig.startOffset;
             Log("[camoverride] steering code patched (%s build) at Flower.exe+0x%llX", sig.build,
                 (unsigned long long)(g_steerStart - base));
