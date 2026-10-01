@@ -1,3 +1,4 @@
+#include "game.h"
 #include "xr.h"
 #include "log.h"
 #include "keys.h"
@@ -144,7 +145,7 @@ static bool CreateInstance()
 
     const char* exts[] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME, XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME };
     XrInstanceCreateInfo ci{ XR_TYPE_INSTANCE_CREATE_INFO };
-    strcpy_s(ci.applicationInfo.applicationName, "Flower VRMod");
+    sprintf_s(ci.applicationInfo.applicationName, "%s VRMod", Game().nameA);
     strcpy_s(ci.applicationInfo.engineName, "PhyreEngine (injected)");
     ci.applicationInfo.apiVersion = XR_API_VERSION_1_0;
     ci.enabledExtensionCount = g_depthExt ? 2 : 1;
@@ -443,7 +444,7 @@ static bool CreateInput()
 
     XrActionSetCreateInfo asci{ XR_TYPE_ACTION_SET_CREATE_INFO };
     strcpy_s(asci.actionSetName, "flower");
-    strcpy_s(asci.localizedActionSetName, "Flower");
+    strcpy_s(asci.localizedActionSetName, Game().nameA);
     XR_CHECK(xrCreateActionSet_(g_instance, &asci, &g_actionSet));
 
     g_actSteer = MakeAction("steer", "Steer (thumbstick)", XR_ACTION_TYPE_VECTOR2F_INPUT);

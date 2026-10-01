@@ -6,6 +6,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <cstring>
+#include <vector>
+#include <algorithm>
 
 static ID3D11Device* g_dev = nullptr;
 static ID3D11DeviceContext* g_imm = nullptr;
@@ -14,20 +16,37 @@ static bool g_active = false;
 static bool g_outputsValid = false;
 static bool g_work = false; // anything but state recorded since the last flush
 static std::unordered_map<ID3D11Resource*, UINT> g_forwardMaps; // mapped dynamic buffers -> size
+static std::unordered_map<UINT, uint64_t> g_fwdBySize; // DIAG: forwarded writes per buffer size since the last stats line
 // Buffers whose last write on the deferred context was ours (patched right-eye
 // data): after execution the game's own data must be put back.
 static std::unordered_set<ID3D11Resource*> g_ourWrites;
 // Plain resources the recorded work copies from: mapping one of those must
 // flush first (the copy has to read the old contents). Others can be mapped freely.
 static std::unordered_set<ID3D11Resource*> g_pendingSources;
+// Dynamic vertex/index buffers aren't copied into the recording when no recorded
+// draw has used them since the last flush: the replay then reads the game's
+// current contents, which is exactly this write. (Journey rewrites ~40 MB of
+// such buffers a frame; copying them all cost ~90 ms.) A buffer that is
+// rewritten after a recorded draw used it forces a flush once and is copied
+// from then on (g_copyAlways).
+static ID3D11Resource* g_curVB[D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT] = {};
+static ID3D11Resource* g_curIB = nullptr;
+static std::unordered_set<ID3D11Resource*> g_usedSinceFlush;
+static std::unordered_set<ID3D11Resource*> g_copyAlways;
 
 static uint64_t g_statFlushes = 0, g_statFlushPresent = 0, g_statFlushMap = 0, g_statFlushOther = 0;
-static uint64_t g_statRightDraws = 0, g_statForwarded = 0, g_statForwardedBytes = 0, g_statStagingSkips = 0;
+static uint64_t g_statRightDraws = 0, g_statForwarded = 0, g_statForwardedBytes = 0, g_statStagingSkips = 0, g_statUncopied = 0;
 
 bool MirrorActive() { return g_active; }
 ID3D11DeviceContext* MirrorContext() { return g_def; }
 bool MirrorRightOutputsValid() { return g_active && g_outputsValid; }
-void MirrorNoteDraw() { g_work = true; g_statRightDraws++; }
+void MirrorNoteDraw()
+{
+    g_work = true;
+    g_statRightDraws++;
+    for (ID3D11Resource* b : g_curVB) if (b) g_usedSinceFlush.insert(b);
+    if (g_curIB) g_usedSinceFlush.insert(g_curIB);
+}
 
 static bool On() { return g_active && !ShadowBypassed(); }
 
@@ -48,6 +67,7 @@ void MirrorFlush(const char* reason)
     list->Release();
     g_work = false;
     g_pendingSources.clear();
+    g_usedSinceFlush.clear();
     for (ID3D11Resource* b : g_ourWrites) CaptureRestoreOriginal(g_imm, b);
     g_ourWrites.clear();
     g_statFlushes++;
@@ -251,7 +271,18 @@ void MirrorBeforeMap(ID3D11Resource* r, D3D11_MAP type)
     {
         D3D11_BUFFER_DESC d = {};
         static_cast<ID3D11Buffer*>(r)->GetDesc(&d);
-        if (d.Usage == D3D11_USAGE_DYNAMIC) { g_forwardMaps[r] = d.ByteWidth; return; }
+        if (d.Usage == D3D11_USAGE_DYNAMIC)
+        {
+            bool geometryOnly = !(d.BindFlags & ~(D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER));
+            if (geometryOnly && !g_copyAlways.count(r) && !g_ourWrites.count(r))
+            {
+                if (!g_usedSinceFlush.count(r)) { g_statUncopied++; return; }
+                g_copyAlways.insert(r); // rewritten after a recorded draw used it
+                MirrorFlush("rewrite");
+            }
+            g_forwardMaps[r] = d.ByteWidth;
+            return;
+        }
     }
     // Staging resources are only reachable by the recorded work through copies
     // from them; anything else mapped (e.g. a dynamic texture) may be sampled.
@@ -279,6 +310,7 @@ void MirrorUnmap(ID3D11Resource* r, const void* data)
         g_def->Unmap(r, 0);
         g_statForwarded++;
         g_statForwardedBytes += size;
+        g_fwdBySize[size]++;
     }
     g_ourWrites.erase(r);
     g_work = true;
@@ -344,11 +376,13 @@ static void STDMETHODCALLTYPE Hook_IASetInputLayout(ID3D11DeviceContext* ctx, ID
 static void STDMETHODCALLTYPE Hook_IASetVertexBuffers(ID3D11DeviceContext* ctx, UINT s, UINT n, ID3D11Buffer* const* b, const UINT* st, const UINT* o)
 {
     realIASetVertexBuffers(ctx, s, n, b, st, o);
+    if (ctx == g_imm) for (UINT i = 0; i < n && s + i < D3D11_IA_VERTEX_INPUT_RESOURCE_SLOT_COUNT; ++i) g_curVB[s + i] = b ? b[i] : nullptr;
     if (Game(ctx)) { ShadowBypass g; g_def->IASetVertexBuffers(s, n, b, st, o); }
 }
 static void STDMETHODCALLTYPE Hook_IASetIndexBuffer(ID3D11DeviceContext* ctx, ID3D11Buffer* b, DXGI_FORMAT f, UINT o)
 {
     realIASetIndexBuffer(ctx, b, f, o);
+    if (ctx == g_imm) g_curIB = b;
     if (Game(ctx)) { ShadowBypass g; g_def->IASetIndexBuffer(b, f, o); }
 }
 static void STDMETHODCALLTYPE Hook_IASetPrimitiveTopology(ID3D11DeviceContext* ctx, D3D11_PRIMITIVE_TOPOLOGY t)
@@ -414,9 +448,17 @@ static void STDMETHODCALLTYPE Hook_RSSetScissorRects(ID3D11DeviceContext* ctx, U
 void MirrorLogStats()
 {
     if (!g_active) return;
-    Log("[mirror] flushes %llu (present %llu, map %llu, other %llu); right draws %llu; forwarded buffer writes %llu (%llu KB); staging maps without flush %llu",
+    Log("[mirror] flushes %llu (present %llu, map %llu, other %llu); right draws %llu; forwarded buffer writes %llu (%llu KB), not needed %llu; staging maps without flush %llu",
         g_statFlushes, g_statFlushPresent, g_statFlushMap, g_statFlushOther, g_statRightDraws,
-        g_statForwarded, g_statForwardedBytes / 1024, g_statStagingSkips);
+        g_statForwarded, g_statForwardedBytes / 1024, g_statUncopied, g_statStagingSkips);
+    // DIAG: the buffer sizes that cost the most since the last line
+    std::vector<std::pair<uint64_t, UINT>> top;
+    for (auto& kv : g_fwdBySize) top.push_back({ kv.second * kv.first, kv.first });
+    std::sort(top.rbegin(), top.rend());
+    for (size_t i = 0; i < top.size() && i < 6; ++i)
+        Log("[mirror]   forwarded %u-byte buffer x%llu (%llu KB)", top[i].second,
+            (unsigned long long)g_fwdBySize[top[i].second], (unsigned long long)(top[i].first / 1024));
+    g_fwdBySize.clear();
 }
 
 void MirrorInstall(ID3D11Device* dev, ID3D11DeviceContext* imm, const wchar_t* ini)

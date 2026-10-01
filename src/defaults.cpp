@@ -1,5 +1,6 @@
 #include "defaults.h"
 #include "log.h"
+#include "game.h"
 #include <Windows.h>
 #include <string>
 #include <cstdio>
@@ -56,19 +57,6 @@ static bool WriteAll(const std::wstring& p, const std::string& data)
     return ok;
 }
 
-// The Documents folder, from the registry (the shell API isn't safe in DllMain).
-static std::wstring DocumentsFolder()
-{
-    wchar_t raw[MAX_PATH] = {};
-    DWORD size = sizeof(raw);
-    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\User Shell Folders",
-            L"Personal", RRF_RT_REG_SZ | RRF_RT_REG_EXPAND_SZ | RRF_NOEXPAND, nullptr, raw, &size) != ERROR_SUCCESS)
-        return {};
-    wchar_t expanded[MAX_PATH] = {};
-    if (!ExpandEnvironmentStringsW(raw, expanded, MAX_PATH)) return {};
-    return expanded;
-}
-
 void EnsureDefaultSettings(const wchar_t* dllDir)
 {
     std::wstring dir(dllDir);
@@ -80,21 +68,22 @@ void EnsureDefaultSettings(const wchar_t* dllDir)
         Log("[defaults] no vrmod.ini: %s one with the recommended settings", ok ? "wrote" : "could NOT write");
     }
 
-    std::wstring cfg = dir + L"\\vrmod_Flower.cfg";
+    const GameInfo& game = Game();
+    std::wstring cfg = dir + L"\\" + game.vrSettingsName;
     if (Exists(cfg)) return;
-    std::wstring docs = DocumentsFolder();
-    std::wstring src = docs.empty() ? std::wstring() : docs + L"\\Flower\\Flower.cfg";
+    const std::wstring& src = game.settingsPath;
     std::string text;
     if (src.empty() || !ReadAll(src, text))
     {
-        Log("[defaults] no vrmod_Flower.cfg and no Documents\\Flower\\Flower.cfg to base it on (start the game once without the mod)");
+        Log("[defaults] no %ls and no %ls to base it on (start the game once without the mod)",
+            game.vrSettingsName.c_str(), src.c_str());
         return;
     }
     size_t a = text.find("<Screen ");
     size_t b = a == std::string::npos ? a : text.find("/>", a);
     if (b == std::string::npos)
     {
-        Log("[defaults] %ls has no <Screen> setting; vrmod_Flower.cfg not created", src.c_str());
+        Log("[defaults] %ls has no <Screen> setting; %ls not created", src.c_str(), game.vrSettingsName.c_str());
         return;
     }
     // Square size = the ini's maxSquare, so the mode list offers exactly this size.
@@ -104,6 +93,6 @@ void EnsureDefaultSettings(const wchar_t* dllDir)
     sprintf_s(screen, "<Screen Anisotrophy=\"16\" FullScreen=\"false\" Height=\"%u\" MultiSampleCount=\"4\" VSync=\"true\" Width=\"%u\"/>", side, side);
     text.replace(a, b + 2 - a, screen);
     bool ok = WriteAll(cfg, text);
-    Log("[defaults] no vrmod_Flower.cfg: %s one from %ls with a square %u x %u, 4x MSAA, windowed screen",
-        ok ? "made" : "could NOT make", src.c_str(), side, side);
+    Log("[defaults] no %ls: %s one from %ls with a square %u x %u, 4x MSAA, windowed screen",
+        game.vrSettingsName.c_str(), ok ? "made" : "could NOT make", src.c_str(), side, side);
 }

@@ -63,6 +63,28 @@ static void DumpBackbufferBMP(IDXGISwapChain* swapChain, uint64_t frameIndex, bo
     D3D11_TEXTURE2D_DESC desc = {};
     backbuffer->GetDesc(&desc);
 
+    if (desc.SampleDesc.Count > 1)
+    {
+        // Multisampled backbuffer (Journey): resolve it, then read the resolved copy.
+        D3D11_TEXTURE2D_DESC rd = desc;
+        rd.SampleDesc = { 1, 0 };
+        rd.Usage = D3D11_USAGE_DEFAULT;
+        rd.BindFlags = 0;
+        rd.CPUAccessFlags = 0;
+        rd.MiscFlags = 0;
+        ID3D11Texture2D* resolved = nullptr;
+        if (FAILED(device->CreateTexture2D(&rd, nullptr, &resolved)) || !resolved)
+        {
+            Log("[dump] could not create a resolve texture (%ux%u, %u samples)", desc.Width, desc.Height, desc.SampleDesc.Count);
+            backbuffer->Release(); if (ctx) ctx->Release(); device->Release();
+            return;
+        }
+        ctx->ResolveSubresource(resolved, 0, backbuffer, 0, desc.Format);
+        backbuffer->Release();
+        backbuffer = resolved;
+        desc = rd;
+    }
+
     D3D11_TEXTURE2D_DESC stagingDesc = desc;
     stagingDesc.Usage = D3D11_USAGE_STAGING;
     stagingDesc.BindFlags = 0;
@@ -72,6 +94,7 @@ static void DumpBackbufferBMP(IDXGISwapChain* swapChain, uint64_t frameIndex, bo
     ID3D11Texture2D* staging = nullptr;
     if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, &staging)) || !staging)
     {
+        Log("[dump] could not create a staging texture (%ux%u, fmt %d)", desc.Width, desc.Height, (int)desc.Format);
         backbuffer->Release();
         if (ctx) ctx->Release();
         device->Release();
