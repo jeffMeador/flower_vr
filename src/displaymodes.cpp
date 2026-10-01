@@ -1,6 +1,8 @@
 #include "displaymodes.h"
 #include "log.h"
 #include "vhook.h"
+#include "game.h"
+#include <MinHook.h>
 #include <dxgi.h>
 #include <vector>
 
@@ -16,6 +18,52 @@ using CreateFactory_t = HRESULT(WINAPI*)(REFIID, void**);
 using GetDisplayModeList_t = HRESULT(STDMETHODCALLTYPE*)(IDXGIOutput*, DXGI_FORMAT, UINT, UINT*, DXGI_MODE_DESC*);
 static CreateFactory_t realCreateFactory, realCreateFactory1;
 static GetDisplayModeList_t realGetDisplayModeList;
+
+// Journey sizes its window from the screen height, which would cut a square
+// 2644 x 2644 window down to 2644 x 2141. Report a screen tall enough for the
+// square (Flower doesn't need this).
+using GetSystemMetrics_t = int(WINAPI*)(int);
+static GetSystemMetrics_t realGetSystemMetrics;
+static int g_tallScreen = 0;
+static int WINAPI Hook_GetSystemMetrics(int index)
+{
+    int v = realGetSystemMetrics(index);
+    int out = v;
+    if (index == SM_CYSCREEN || index == SM_CYFULLSCREEN || index == SM_CYMAXIMIZED ||
+        index == SM_CYVIRTUALSCREEN || index == SM_CYMAXTRACK)
+        out = v < g_tallScreen ? g_tallScreen : v;
+    return out;
+}
+
+// Windows also caps a captioned window at the screen size (WM_GETMINMAXINFO's
+// max track size), so the game's window procedure is wrapped to raise that.
+// RegisterClassA is hooked to wrap each class's procedure (a few at most).
+using RegisterClassA_t = ATOM(WINAPI*)(const WNDCLASSA*);
+static RegisterClassA_t realRegisterClassA;
+static WNDPROC g_origProcs[4];
+static int g_wrapped = 0;
+template <int N>
+static LRESULT CALLBACK WrappedProc(HWND h, UINT msg, WPARAM w, LPARAM l)
+{
+    LRESULT r = CallWindowProcA(g_origProcs[N], h, msg, w, l);
+    if (msg == WM_GETMINMAXINFO && l)
+    {
+        MINMAXINFO* mm = (MINMAXINFO*)l;
+        if (mm->ptMaxTrackSize.y < g_tallScreen + 200) mm->ptMaxTrackSize.y = g_tallScreen + 200;
+        if (mm->ptMaxTrackSize.x < g_tallScreen + 200) mm->ptMaxTrackSize.x = g_tallScreen + 200;
+    }
+    return r;
+}
+static const WNDPROC kWrappers[4] = { WrappedProc<0>, WrappedProc<1>, WrappedProc<2>, WrappedProc<3> };
+static ATOM WINAPI Hook_RegisterClassA(const WNDCLASSA* wc)
+{
+    if (!wc || !wc->lpfnWndProc || g_wrapped >= 4) return realRegisterClassA(wc);
+    WNDCLASSA copy = *wc;
+    g_origProcs[g_wrapped] = wc->lpfnWndProc;
+    copy.lpfnWndProc = kWrappers[g_wrapped++];
+    Log("[modes] window class '%s': max window size raised for a square window", HIWORD((ULONG_PTR)wc->lpszClassName) ? wc->lpszClassName : "#atom");
+    return realRegisterClassA(&copy);
+}
 
 static HRESULT STDMETHODCALLTYPE Hook_GetDisplayModeList(IDXGIOutput* self, DXGI_FORMAT fmt, UINT flags, UINT* num, DXGI_MODE_DESC* desc)
 {
@@ -145,4 +193,15 @@ void DisplayModesInstall(const wchar_t* dllDir)
     if (f0 && MH_CreateHook(f0, (void*)&Hook_CreateFactory, (void**)&realCreateFactory) == MH_OK) MH_EnableHook(f0);
     if (f1 && MH_CreateHook(f1, (void*)&Hook_CreateFactory1, (void**)&realCreateFactory1) == MH_OK) MH_EnableHook(f1);
     Log("[modes] hooked CreateDXGIFactory/CreateDXGIFactory1");
+
+    if (!wcscmp(Game().name, L"Journey"))
+    {
+        g_tallScreen = (int)(g_maxSquare ? g_maxSquare : 3072) + 200;
+        HMODULE user = GetModuleHandleW(L"user32.dll");
+        void* gsm = user ? (void*)GetProcAddress(user, "GetSystemMetrics") : nullptr;
+        bool ok = gsm && MH_CreateHook(gsm, (void*)&Hook_GetSystemMetrics, (void**)&realGetSystemMetrics) == MH_OK && MH_EnableHook(gsm) == MH_OK;
+        void* rc = user ? (void*)GetProcAddress(user, "RegisterClassA") : nullptr;
+        ok = ok && rc && MH_CreateHook(rc, (void*)&Hook_RegisterClassA, (void**)&realRegisterClassA) == MH_OK && MH_EnableHook(rc) == MH_OK;
+        Log("[modes] screen height reported as at least %d for a square window: %s", g_tallScreen, ok ? "hooked" : "FAILED");
+    }
 }

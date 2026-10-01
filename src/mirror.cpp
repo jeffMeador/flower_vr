@@ -16,7 +16,7 @@ static bool g_active = false;
 static bool g_outputsValid = false;
 static bool g_work = false; // anything but state recorded since the last flush
 static std::unordered_map<ID3D11Resource*, UINT> g_forwardMaps; // mapped dynamic buffers -> size
-static std::unordered_map<UINT, uint64_t> g_fwdBySize; // DIAG: forwarded writes per buffer size since the last stats line
+static std::unordered_map<UINT, uint64_t> g_fwdBySize; // forwarded writes per buffer size since the last stats line (logged: the costliest)
 // Buffers whose last write on the deferred context was ours (patched right-eye
 // data): after execution the game's own data must be put back.
 static std::unordered_set<ID3D11Resource*> g_ourWrites;
@@ -451,7 +451,7 @@ void MirrorLogStats()
     Log("[mirror] flushes %llu (present %llu, map %llu, other %llu); right draws %llu; forwarded buffer writes %llu (%llu KB), not needed %llu; staging maps without flush %llu",
         g_statFlushes, g_statFlushPresent, g_statFlushMap, g_statFlushOther, g_statRightDraws,
         g_statForwarded, g_statForwardedBytes / 1024, g_statUncopied, g_statStagingSkips);
-    // DIAG: the buffer sizes that cost the most since the last line
+    // the buffer sizes that cost the most since the last line
     std::vector<std::pair<uint64_t, UINT>> top;
     for (auto& kv : g_fwdBySize) top.push_back({ kv.second * kv.first, kv.first });
     std::sort(top.rbegin(), top.rend());
