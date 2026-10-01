@@ -8,6 +8,7 @@
 #include "xr.h"
 #include "stereo.h"
 #include "camfind.h"
+#include "journeycam.h"
 #include "camoverride.h"
 #include "shadow.h"
 #include "mirror.h"
@@ -28,9 +29,12 @@ bool HooksPassthrough()
     return GetPrivateProfileIntW(L"debug", L"passthrough", 0, ini) != 0;
 }
 
+static bool g_forceGameFov = false; // [debug] forceGameFov=1: Journey FOV override without VR (testing)
+
 void SetHooksDllDir(const wchar_t* dir)
 {
     wcscpy_s(g_dllDir, dir);
+    CamFindSetDir(dir);
 }
 
 // Minimal 32bpp BMP writer for verifying frames visually without extra deps.
@@ -279,6 +283,7 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
     g_blockN++;
     { BlockTimer bt(g_xrSum, g_xrWorst); XrSubmitFrame(This, renderedEye); }
     CamOverrideTick(XrSessionActive());
+    JourneyCamTick(XrSessionActive() || g_forceGameFov);
     {
         DXGI_SWAP_CHAIN_DESC scd = {};
         This->GetDesc(&scd);
@@ -363,6 +368,8 @@ void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* device, ID
         swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
         GetPrivateProfileStringW(L"xr", L"gameFov", L"125", buf, 32, ini);
         CamOverrideInstall((float)_wtof(buf));
+        JourneyCamInstall((float)_wtof(buf));
+        g_forceGameFov = GetPrivateProfileIntW(L"debug", L"forceGameFov", 0, ini) != 0;
         CamOverrideSetHeadCamera(GetPrivateProfileIntW(L"xr", L"headCamera", 0, ini) != 0);
         CamOverrideSetTerrainClamp(GetPrivateProfileIntW(L"xr", L"terrainClamp", 0, ini) != 0);
     }
