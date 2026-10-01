@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include "fakepad.h"
 #include "log.h"
 #include <MinHook.h>
@@ -11,7 +12,7 @@
 //  - a text file, so scripts can drive the game (the game's raw-input path
 //    ignores injected SendInput events)
 //
-// vrmod_pad.txt, one line:  <lx> <ly> [A] [B] [X] [Y] [START] [BACK] [LT] [RT]
+// vrmod_pad.txt, one line:  <lx> <ly> [A] [B] [X] [Y] [START] [BACK] [LT] [RT] [RX=<v>] [RY=<v>]
 // lx/ly in -1..1. Missing file = neutral pad. The pad only appears when
 // vrmod.ini has [debug] fakepad=1.
 
@@ -21,22 +22,22 @@ static XInputGetState_t g_realXInputGetState = nullptr;
 static wchar_t g_padPath[MAX_PATH] = {};
 static FILETIME g_lastWrite = {};
 static DWORD g_lastCheck = 0;
-static float g_lx = 0, g_ly = 0;
+static float g_lx = 0, g_ly = 0, g_rx = 0, g_ry = 0;
 static WORD g_buttons = 0;
 static BYTE g_lt = 0, g_rt = 0;
 static DWORD g_packet = 0;
 static bool g_fileEnabled = false;
 
 // Second source: VR motion controllers (set every frame by the XR code).
-static volatile float g_xrLx = 0, g_xrLy = 0;
+static volatile float g_xrLx = 0, g_xrLy = 0, g_xrRx = 0, g_xrRy = 0;
 static volatile WORD g_xrButtons = 0;
 static volatile BYTE g_xrLt = 0, g_xrRt = 0;
 static volatile DWORD g_xrPacket = 0;
 
-void FakePadSetXR(float lx, float ly, WORD buttons, BYTE lt, BYTE rt)
+void FakePadSetXR(float lx, float ly, WORD buttons, BYTE lt, BYTE rt, float rx, float ry)
 {
-    if (lx != g_xrLx || ly != g_xrLy || buttons != g_xrButtons || lt != g_xrLt || rt != g_xrRt) g_xrPacket++;
-    g_xrLx = lx; g_xrLy = ly; g_xrButtons = buttons; g_xrLt = lt; g_xrRt = rt;
+    if (lx != g_xrLx || ly != g_xrLy || buttons != g_xrButtons || lt != g_xrLt || rt != g_xrRt || rx != g_xrRx || ry != g_xrRy) g_xrPacket++;
+    g_xrLx = lx; g_xrLy = ly; g_xrButtons = buttons; g_xrLt = lt; g_xrRt = rt; g_xrRx = rx; g_xrRy = ry;
 }
 
 static void ReloadPadFile()
@@ -48,7 +49,7 @@ static void ReloadPadFile()
     WIN32_FILE_ATTRIBUTE_DATA attr;
     if (!GetFileAttributesExW(g_padPath, GetFileExInfoStandard, &attr))
     {
-        g_lx = g_ly = 0; g_buttons = 0;
+        g_lx = g_ly = g_rx = g_ry = 0; g_buttons = 0;
         return;
     }
     if (CompareFileTime(&attr.ftLastWriteTime, &g_lastWrite) == 0) return;
@@ -60,7 +61,7 @@ static void ReloadPadFile()
     fgets(line, sizeof(line), f);
     fclose(f);
 
-    float lx = 0, ly = 0;
+    float lx = 0, ly = 0, rx = 0, ry = 0;
     sscanf_s(line, "%f %f", &lx, &ly);
     WORD b = 0;
     BYTE lt = 0, rt = 0;
@@ -75,10 +76,12 @@ static void ReloadPadFile()
         else if (!strcmp(tok, "BACK")) b |= XINPUT_GAMEPAD_BACK;
         else if (!strcmp(tok, "LT")) lt = 255;
         else if (!strcmp(tok, "RT")) rt = 255;
+        else if (!strncmp(tok, "RX=", 3)) rx = (float)atof(tok + 3);
+        else if (!strncmp(tok, "RY=", 3)) ry = (float)atof(tok + 3);
     }
-    g_lx = lx; g_ly = ly; g_buttons = b; g_lt = lt; g_rt = rt;
+    g_lx = lx; g_ly = ly; g_rx = rx; g_ry = ry; g_buttons = b; g_lt = lt; g_rt = rt;
     g_packet++;
-    Log("[fakepad] lx=%.2f ly=%.2f buttons=0x%04X lt=%u rt=%u", lx, ly, b, lt, rt);
+    Log("[fakepad] lx=%.2f ly=%.2f rx=%.2f ry=%.2f buttons=0x%04X lt=%u rt=%u", lx, ly, rx, ry, b, lt, rt);
 }
 
 static SHORT ToAxis(float v)
@@ -103,6 +106,9 @@ static DWORD WINAPI Hook_XInputGetState(DWORD user, XINPUT_STATE* state)
     float lx = g_lx != 0 ? g_lx : g_xrLx, ly = g_ly != 0 ? g_ly : g_xrLy;
     if (lx != 0) state->Gamepad.sThumbLX = ToAxis(lx);
     if (ly != 0) state->Gamepad.sThumbLY = ToAxis(ly);
+    float rx = g_rx != 0 ? g_rx : g_xrRx, ry = g_ry != 0 ? g_ry : g_xrRy;
+    if (rx != 0) state->Gamepad.sThumbRX = ToAxis(rx);
+    if (ry != 0) state->Gamepad.sThumbRY = ToAxis(ry);
     return ERROR_SUCCESS;
 }
 

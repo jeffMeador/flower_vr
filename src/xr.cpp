@@ -379,6 +379,7 @@ static XrPath g_hand[2] = {};
 static XrSpace g_aimSpace[2] = {};
 static bool g_inputReady = false;
 static bool g_motionSteering = true;
+static bool g_journey = false; // Journey: its own controller mapping (set at input setup)
 static bool g_invertStickY = true; // [xr] invertStickY
 static float g_pitchRest = 0.0f;    // sin of [xr] pitchRestDegrees: nose angle that means "straight" (negative = nose down)
 static float g_tiltFull = 0.7071f;  // sin of [xr] tiltTurnDegrees (45): roll for a full turn
@@ -427,6 +428,8 @@ static bool CreateInput()
     wchar_t mode[32];
     GetPrivateProfileStringW(L"xr", L"steering", L"motion", mode, 32, g_iniPath);
     g_motionSteering = _wcsicmp(mode, L"stick") != 0;
+    g_journey = !wcscmp(Game().name, L"Journey");
+    if (g_journey) Log("[xr] Journey controls: left stick walk, right stick turn, A/trigger jump, B/grip sing");
     g_invertStickY = GetPrivateProfileIntW(L"xr", L"invertStickY", 1, g_iniPath) != 0;
     {
         int deg = (int)GetPrivateProfileIntW(L"xr", L"tiltTurnDegrees", 45, g_iniPath);
@@ -561,9 +564,15 @@ static void PollControllers(XrTime time)
     bool menu = false, toggle = false, recenter = false;
     XrPosef aim[2];
     bool aimOk[2] = {};
+    XrVector2f handStick[2] = {};
+    bool handB[2] = {};
+    float handGrip[2] = {};
     for (int h = 0; h < 2; ++h)
     {
         XrVector2f s = GetVec2(g_actSteer, h);
+        handStick[h] = s;
+        handB[h] = GetBool(g_actToggle, h);
+        handGrip[h] = GetFloat(g_actGrip, h);
         if (s.x * s.x + s.y * s.y > stickX * stickX + stickY * stickY) { stickX = s.x; stickY = s.y; }
         float t = GetFloat(g_actTrigger, h), g = GetFloat(g_actGrip, h);
         if (t > fly) fly = t;
@@ -586,6 +595,35 @@ static void PollControllers(XrTime time)
         aimOk[h] = XR_SUCCEEDED(xrLocateSpace_(g_aimSpace[h], g_localSpace, time, &loc)) &&
             (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT);
         aim[h] = loc.pose;
+    }
+
+    if (g_journey)
+    {
+        // Journey: walk on the ground, so plain gamepad controls; the head
+        // looks around. Left stick walks (forward = where the camera faces),
+        // right stick turns the camera; with one controller its stick walks.
+        // A / X / trigger = jump & fly (pad A), B / Y / grip = sing (pad B, hold
+        // for a longer call), menu = pause (pad START).
+        bool both = aimOk[0] && aimOk[1];
+        XrVector2f walk = both ? handStick[0] : (aimOk[0] ? handStick[0] : handStick[1]);
+        XrVector2f turn = both ? handStick[1] : XrVector2f{ 0, 0 };
+        float trig = 0;
+        for (int h = 0; h < 2; ++h) { float t = GetFloat(g_actTrigger, h); if (t > trig) trig = t; }
+        bool jump = GetBool(g_actFlyButton, 0) || GetBool(g_actFlyButton, 1) || trig > 0.5f;
+        bool sing = handB[0] || handB[1] || handGrip[0] > 0.5f || handGrip[1] > 0.5f;
+        WORD buttons = 0;
+        if (jump) buttons |= XINPUT_GAMEPAD_A;
+        if (sing) buttons |= XINPUT_GAMEPAD_B;
+        if (menu) buttons |= XINPUT_GAMEPAD_START;
+        static DWORD lastJDiag = 0;
+        if (GetTickCount() - lastJDiag > 3000)
+        {
+            lastJDiag = GetTickCount();
+            Log("[xr] journey pad: hands %d%d walk (%.2f %.2f) turn (%.2f %.2f) jump %d sing %d menu %d",
+                aimOk[0], aimOk[1], walk.x, walk.y, turn.x, turn.y, jump, sing, menu);
+        }
+        FakePadSetXR(walk.x, walk.y, buttons, 0, 0, turn.x, turn.y);
+        return;
     }
 
     if (toggle)
