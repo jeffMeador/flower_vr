@@ -28,7 +28,20 @@ Fan project, not affiliated with or endorsed by thatgamecompany or Annapurna Int
 
 ## Install
 
-1. **Build and deploy.** Edit `GAMEDIR` at the top of `build.bat` to your Flower folder (GOG install folder, or for Steam e.g. `C:\Program Files (x86)\Steam\steamapps\common\Flower`; right-click Flower in Steam → Manage → Browse local files), then run `build.bat` from this folder. It:
+Your Flower folder is the GOG install folder, or for Steam e.g. `C:\Program Files (x86)\Steam\steamapps\common\Flower` (right-click Flower in Steam → Manage → Browse local files).
+
+### Option A: download the DLL
+
+1. Download `d3d11.dll` from the [latest release](https://github.com/jeffMeador/flower_vr/releases/latest). To check it, run `Get-FileHash d3d11.dll` in PowerShell and compare with the SHA-256 in the release notes.
+2. Copy it into your Flower folder, next to `Flower.exe`.
+3. Copy `C:\Windows\System32\d3d11.dll` into the same folder and rename the copy `d3d11_orig.dll`. This is the real Direct3D from your own Windows, which the mod forwards to; never share it.
+4. **Play.** Start SteamVR with the headset connected, then launch Flower. On first launch the mod creates `vrmod.ini` (recommended settings, 2160 x 2160 per eye) and `vrmod_Flower.cfg` (a copy of your normal settings with a square screen, 4x MSAA). For the full quality on a fast GPU, replace them with the `.example` files from this repository.
+
+Some antivirus programs warn about unsigned DLLs that hook a game; that's expected for mods like this. The level movies are black on PC even without the mod; Option B also turns them off.
+
+### Option B: build from source
+
+1. **Build and deploy.** Edit `GAMEDIR` at the top of `build.bat` to your Flower folder, then run `build.bat` from this folder. It:
    - builds `d3d11.dll` (the mod) and copies it into the game folder,
    - copies your own `C:\Windows\System32\d3d11.dll` next to it as `d3d11_orig.dll` (the real Direct3D, which the mod forwards to; never share this file),
    - generates the override folder `vrmod_overrides` from your copy of the game (movie skip).
