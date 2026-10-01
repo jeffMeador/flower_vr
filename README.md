@@ -87,7 +87,6 @@ The full engineering log is in [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Decisions
 
-- **GOG first, then Steam.** The GOG build is DRM-free and was the reference throughout. The Steam build is a different compile, so the two code sites the mod patches (camera and steering) sit at different addresses and, for steering, use different instructions. The mod finds each by byte pattern and carries a patch for both builds.
 - **Standalone on the Steam Frame: it works, but it's parked.** The GOG game runs on the headset itself through Proton and FEX with VR through Proton's OpenXR bridge, at 72 fps with 1600 x 1600 per eye and Medium grass (the code is included - see `tools/frame` and the development log). The mobile GPU can't do the grass density, resolution and anti-aliasing that make the game look good, so streaming from a PC is the way to play.
 - **Batched double render.** Drawing both eyes by switching render targets per draw was fine on desktop GPUs but broke every render pass on the Frame's tile-based GPU (13 ms vs 8 ms). Recording the right eye and replaying it in one block fixed that and also halved the PC's GPU time, which paid for 2644-per-eye rendering with 8x MSAA.
 - **No DLSS/FSR.** They need per-pixel motion vectors the game doesn't produce, and frame generation doesn't apply to VR. With the GPU headroom, plain resolution and MSAA do the job.
