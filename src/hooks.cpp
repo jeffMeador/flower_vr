@@ -368,7 +368,7 @@ void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* device, ID
         swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
         GetPrivateProfileStringW(L"xr", L"gameFov", L"125", buf, 32, ini);
         CamOverrideInstall((float)_wtof(buf));
-        JourneyCamInstall((float)_wtof(buf));
+        JourneyCamInstall((float)_wtof(buf), GetPrivateProfileIntW(L"xr", L"headCamera", 0, ini) != 0);
         g_forceGameFov = GetPrivateProfileIntW(L"debug", L"forceGameFov", 0, ini) != 0;
         CamOverrideSetHeadCamera(GetPrivateProfileIntW(L"xr", L"headCamera", 0, ini) != 0);
         CamOverrideSetTerrainClamp(GetPrivateProfileIntW(L"xr", L"terrainClamp", 0, ini) != 0);
