@@ -44,7 +44,6 @@ enum class XrStage { Off, NeedInstance, NeedSystem, Running, Failed };
 static XrStage g_stage = XrStage::Off;
 static ID3D11Device* g_device = nullptr;
 static wchar_t g_loaderPath[MAX_PATH] = {};
-static DWORD g_nextRetry = 0;
 
 static XrInstance g_instance = XR_NULL_HANDLE;
 static XrSystemId g_system = XR_NULL_SYSTEM_ID;
@@ -1280,6 +1279,17 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
         if (errs++ < 10) Log("[xr] xrEndFrame failed: %s", ResultStr(r));
     }
 }
+// Background: instance (every 5 s), then system (every 2 s), until both exist.
+static HANDLE g_probeThread = nullptr;
+static volatile LONG g_probeReady = 0;
+static DWORD WINAPI ProbeThread(LPVOID)
+{
+    while (!CreateInstance()) Sleep(5000);
+    while (!GetSystem()) Sleep(2000);
+    InterlockedExchange(&g_probeReady, 1); // publishes g_instance, g_system and the function pointers
+    return 0;
+}
+
 void XrSubmitFrame(IDXGISwapChain* swapChain, int renderedEye)
 {
     switch (g_stage)
@@ -1289,16 +1299,17 @@ void XrSubmitFrame(IDXGISwapChain* swapChain, int renderedEye)
         return;
     case XrStage::NeedInstance:
         if (!xrGetInstanceProcAddr_ && !LoadLoader()) { g_stage = XrStage::Failed; return; }
-        if (GetTickCount() < g_nextRetry) return;
-        g_nextRetry = GetTickCount() + 5000;
-        if (!CreateInstance()) return;
-        g_nextRetry = 0;
+        // xrCreateInstance / xrGetSystem can block for many seconds while SteamVR
+        // starts or has no headset; on the render thread that froze the game.
+        // They don't touch D3D, so they retry on a background thread.
+        if (!g_probeThread) g_probeThread = CreateThread(nullptr, 0, ProbeThread, nullptr, 0, nullptr);
+        if (InterlockedCompareExchange(&g_probeReady, 0, 0) == 0) return;
+        WaitForSingleObject(g_probeThread, INFINITE);
+        CloseHandle(g_probeThread);
+        g_probeThread = nullptr;
         g_stage = XrStage::NeedSystem;
         // fallthrough
     case XrStage::NeedSystem:
-        if (GetTickCount() < g_nextRetry) return;
-        g_nextRetry = GetTickCount() + 2000;
-        if (!GetSystem()) return;
         if (!CreateSession(swapChain)) { g_stage = XrStage::Failed; return; }
         g_stage = XrStage::Running;
         // fallthrough
