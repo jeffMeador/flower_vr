@@ -30,7 +30,8 @@ static const char kDefaultIni[] =
     "cameraSide=-0.25\r\n"
     "cameraFlights=1\r\n"
     "maxSquare=2160\r\n"
-    "steering=motion\r\n";
+    "steering=motion\r\n"
+    "pitchRestDegrees=10\r\n";
 
 
 static bool Exists(const std::wstring& p) { return GetFileAttributesW(p.c_str()) != INVALID_FILE_ATTRIBUTES; }

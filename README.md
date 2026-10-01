@@ -49,7 +49,7 @@ Fan project, not affiliated with or endorsed by thatgamecompany or Annapurna Int
 | Menu button | Pause |
 | In the menu | Tilt to pick a level, trigger to choose |
 
-Tilt is measured against the horizon, like the PS3 controls: holding the controller level means straight, so there is nothing to reset. If you naturally hold it nose-down, set `pitchRestDegrees` (e.g. -10) so that feels like level flight.
+Tilt is measured against the horizon, like the PS3 controls: holding the controller level means straight, so there is nothing to reset. "Level" is the controller's nose pointed slightly up (10°), which felt the most natural; change `pitchRestDegrees` if you hold it differently.
 
 Keyboard hotkeys (only while the game window has focus): F6 recenter the view, `[` `]` camera back/forward, `,` `.` camera down/up (saved to `vrmod.ini`), F1 depth of field, F2 lens effect, F3 head-turned camera, F12 save both eyes as images.
 
@@ -68,7 +68,7 @@ Keyboard hotkeys (only while the game window has focus): F6 recenter the view, `
 | `[xr] cameraFlights` | 1 | 0 stops the game's scripted camera flights to viewpoints (they're part of the game's storytelling, so they're on by default). |
 | `[xr] steering` | motion | `motion` or `stick`. |
 | `[xr] tiltTurnDegrees` | 45 | Controller tilt for a full turn. |
-| `[xr] pitchRestDegrees` | 0 | Nose angle that counts as straight for climbing (negative = nose down). |
+| `[xr] pitchRestDegrees` | 10 | Nose angle that counts as straight for climbing (negative = nose down). |
 | `[xr] invertStickY` | 1 | Thumbstick up = dive in levels. |
 | `[xr] maxSquare` | 2644 | Must match the square resolution in `vrmod_Flower.cfg`. |
 

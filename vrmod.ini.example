@@ -24,3 +24,4 @@ cameraSide=-0.25
 cameraFlights=1
 maxSquare=2644
 steering=motion
+pitchRestDegrees=10

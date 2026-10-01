@@ -433,7 +433,7 @@ static bool CreateInput()
         if (deg > 80) deg = 80;
         g_tiltFull = sinf(deg * 3.14159265f / 180.0f);
         Log("[xr] tilt to turn: %d degrees for a full turn", deg);
-        int rest = (int)GetPrivateProfileIntW(L"xr", L"pitchRestDegrees", 0, g_iniPath);
+        int rest = (int)GetPrivateProfileIntW(L"xr", L"pitchRestDegrees", 10, g_iniPath);
         if (rest < -60) rest = -60;
         if (rest > 60) rest = 60;
         g_pitchRest = sinf(rest * 3.14159265f / 180.0f);
