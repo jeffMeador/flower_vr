@@ -32,7 +32,7 @@ Your Flower folder is the GOG install folder, or for Steam e.g. `C:\Program File
 
 ### Option A: download the DLL
 
-1. Download `d3d11.dll` from the [latest release](https://github.com/jeffMeador/flower_vr/releases/latest). To check it, run `Get-FileHash d3d11.dll` in PowerShell and compare with the SHA-256 in the release notes.
+1. Download `d3d11.dll` from the [latest release](https://github.com/jeffMeador/flower_vr/releases/latest). One file works with both the GOG and the Steam version (1.0 was GOG only). To check it, run `Get-FileHash d3d11.dll` in PowerShell and compare with the SHA-256 in the release notes.
 2. Copy it into your Flower folder, next to `Flower.exe`.
 3. Copy `C:\Windows\System32\d3d11.dll` into the same folder and rename the copy `d3d11_orig.dll`. This is the real Direct3D from your own Windows, which the mod forwards to; never share it.
 4. **Play.** Start SteamVR with the headset connected, then launch Flower. On first launch the mod creates `vrmod.ini` (recommended settings, 2160 x 2160 per eye) and `vrmod_Flower.cfg` (a copy of your normal settings with a square screen, 4x MSAA). For the full quality on a fast GPU, replace them with the `.example` files from this repository.
