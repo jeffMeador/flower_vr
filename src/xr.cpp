@@ -4,7 +4,9 @@
 #include "keys.h"
 #include "stereo.h"
 #include "shadow.h"
+#include "vhook.h"
 #include <Windows.h>
+#include <TlHelp32.h>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -1282,8 +1284,36 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
 // Background: instance (every 5 s), then system (every 2 s), until both exist.
 static HANDLE g_probeThread = nullptr;
 static volatile LONG g_probeReady = 0;
+// Asking OpenXR for an instance starts SteamVR if it isn't running. Started
+// that way (by the game, before the headset connected through Steam Link),
+// SteamVR came up with a "Disconnected VRLink Headset" that Steam Link could
+// no longer attach to, so every game ran flat. So: only connect once SteamVR's
+// compositor is running, i.e. SteamVR is up with a headset. Not under Wine
+// (the Steam Frame's own runtime has no such process). [xr] waitForSteamVR=0 skips it.
+static bool ProcessRunning(const wchar_t* exe)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return true; // can't tell: don't block
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    bool found = false;
+    for (BOOL ok = Process32FirstW(snap, &pe); ok && !found; ok = Process32NextW(snap, &pe))
+        found = _wcsicmp(pe.szExeFile, exe) == 0;
+    CloseHandle(snap);
+    return found;
+}
+
 static DWORD WINAPI ProbeThread(LPVOID)
 {
+    if (GetPrivateProfileIntW(L"xr", L"waitForSteamVR", 1, g_iniPath) && !RunningUnderWine())
+    {
+        bool logged = false;
+        while (!ProcessRunning(L"vrcompositor.exe"))
+        {
+            if (!logged) { Log("[xr] waiting for SteamVR with a headset (connect the headset first; the mod won't start SteamVR)"); logged = true; }
+            Sleep(2000);
+        }
+        if (logged) Log("[xr] SteamVR compositor is running; connecting");
+    }
     while (!CreateInstance()) Sleep(5000);
     while (!GetSystem()) Sleep(2000);
     InterlockedExchange(&g_probeReady, 1); // publishes g_instance, g_system and the function pointers
