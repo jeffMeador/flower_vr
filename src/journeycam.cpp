@@ -69,25 +69,10 @@ static void* __fastcall Hook_SceneParams(void* out, uint8_t* view, void* a3, voi
     return realSceneParams(out, view, a3, a4);
 }
 
-// The turned transform stays in place until Present, because culling and the
-// terrain read the camera's transform after UpdateView (restoring it right away
-// left gaps behind you). It's put back at Present only if it still holds our
-// values (if the game has written a new one meanwhile, that one stays).
-static float* g_turnedAt = nullptr;
-static float g_turnedOrig[12], g_turnedVals[12];
-
-static void RestoreTurned()
-{
-    if (g_turnedAt && memcmp(g_turnedAt, g_turnedVals, sizeof(g_turnedVals)) == 0)
-        memcpy(g_turnedAt, g_turnedOrig, sizeof(g_turnedOrig));
-    g_turnedAt = nullptr;
-}
-
 static void* __fastcall Hook_UpdateView(uint8_t* view)
 {
     uint8_t* cam = view ? view - 0x10 : nullptr;
     float* w = view ? *(float**)(view + 0xB0) : nullptr;
-    if (w && w == g_turnedAt) RestoreTurned(); // called again this frame: start from the game's values
     if (!g_enabled || !g_headCamera || cam != g_sceneCam || !w) return realUpdateView(view);
 
     // Unpack to Flower's layout: rows right, up, z, position.
@@ -102,12 +87,12 @@ static void* __fastcall Hook_UpdateView(uint8_t* view)
             n[j][k] = e[0][k] * R[0 * 3 + j] + e[1][k] * R[1 * 3 + j] + e[2][k] * R[2 * 3 + j];
     for (int k = 0; k < 3; ++k) np[k] = pos[k] + e[0][k] * t[0] + e[1][k] * t[1] + e[2][k] * t[2];
 
+    float saved[12];
+    memcpy(saved, w, sizeof(saved));
     const float packed[12] = { n[1][0], n[1][1], n[1][2], n[0][0],  n[2][0], n[2][1], n[2][2], n[0][1],  np[0], np[1], np[2], n[0][2] };
-    memcpy(g_turnedOrig, w, sizeof(g_turnedOrig));
-    memcpy(g_turnedVals, packed, sizeof(g_turnedVals));
     memcpy(w, packed, sizeof(packed));
-    g_turnedAt = w;
     void* r = realUpdateView(view);
+    memcpy(w, saved, sizeof(saved));
 
     static DWORD lastLog = 0;
     if (GetTickCount() - lastLog > 10000) { lastLog = GetTickCount(); Log("[journeycam] head camera active"); }
@@ -151,7 +136,6 @@ bool JourneyCamInstall(float fovDegrees, bool headCamera)
 
 void JourneyCamTick(bool enable)
 {
-    RestoreTurned(); // Present: the frame is drawn, give the game its own camera back
     if (enable != g_enabled) Log("[journeycam] FOV override %s", enable ? "on" : "off");
     if (!enable && g_enabled && g_headCamera) StereoHeadNotApplied(); // the shaders take the head again
     g_enabled = enable;
