@@ -1284,12 +1284,13 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
 // Background: instance (every 5 s), then system (every 2 s), until both exist.
 static HANDLE g_probeThread = nullptr;
 static volatile LONG g_probeReady = 0;
-// Asking OpenXR for an instance starts SteamVR if it isn't running. Started
-// that way (by the game, before the headset connected through Steam Link),
-// SteamVR came up with a "Disconnected VRLink Headset" that Steam Link could
-// no longer attach to, so every game ran flat. So: only connect once SteamVR's
-// compositor is running, i.e. SteamVR is up with a headset. Not under Wine
-// (the Steam Frame's own runtime has no such process). [xr] waitForSteamVR=0 skips it.
+// Asking OpenXR for an instance starts SteamVR if it isn't running, like any
+// VR game. That only reaches a Steam Link headset when the game was started by
+// Steam (which passes the link session, VTE_CLIENT_SESSION_ID); started from
+// its exe, SteamVR came up with a "Disconnected VRLink Headset" and the game
+// ran flat. [xr] waitForSteamVR=1: never start SteamVR, connect only once its
+// compositor runs (SteamVR up with a headset). Not under Wine (the Steam
+// Frame's own runtime has no such process).
 static bool ProcessRunning(const wchar_t* exe)
 {
     HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
@@ -1304,7 +1305,7 @@ static bool ProcessRunning(const wchar_t* exe)
 
 static DWORD WINAPI ProbeThread(LPVOID)
 {
-    if (GetPrivateProfileIntW(L"xr", L"waitForSteamVR", 1, g_iniPath) && !RunningUnderWine())
+    if (GetPrivateProfileIntW(L"xr", L"waitForSteamVR", 0, g_iniPath) && !RunningUnderWine())
     {
         bool logged = false;
         while (!ProcessRunning(L"vrcompositor.exe"))
