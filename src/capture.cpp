@@ -79,6 +79,7 @@ struct PixelOverride
     float value;
 };
 static std::unordered_map<ID3D11PixelShader*, std::vector<PixelOverride>> g_psOverrides;
+static std::unordered_map<ID3D11PixelShader*, std::string> g_psNames; // constant names, for vrmod_uitrace
 
 // [psoverride] in vrmod.ini: <constant name>=<float>, lower-cased names. Pins any
 // pixel-shader constant while in stereo (for tuning another game's effects).
@@ -88,6 +89,15 @@ static std::unordered_map<std::string, float> LoadFixedOverrides()
     wchar_t ini[MAX_PATH];
     extern wchar_t g_dllDir[MAX_PATH];
     swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
+    if (!wcscmp(Game().name, L"Journey"))
+    {
+        // Journey's depth of field (blur strength from depth: nearScale/farScale)
+        // smeared the intro in VR, and its heat shimmer (heatScale) distorts the
+        // whole view. Off by default; [stereo] journeyDof=1 / heatShimmer=1 keep them.
+        if (!GetPrivateProfileIntW(L"stereo", L"journeyDof", 0, ini)) { m["nearscale"] = 0.0f; m["farscale"] = 0.0f; }
+        if (!GetPrivateProfileIntW(L"stereo", L"heatShimmer", 0, ini)) m["heatscale"] = 0.0f;
+        Log("[capture] Journey: depth of field %s, heat shimmer %s", m.count("farscale") ? "off" : "on", m.count("heatscale") ? "off" : "on");
+    }
     wchar_t buf[4096] = {};
     DWORD n = GetPrivateProfileSectionW(L"psoverride", buf, 4096, ini);
     for (const wchar_t* p = buf; p < buf + n && *p; p += wcslen(p) + 1)
@@ -312,6 +322,7 @@ static HRESULT STDMETHODCALLTYPE Hook_CreatePixelShader(ID3D11Device* self, cons
             cbr->GetVariableByIndex(v)->GetDesc(&vd);
             if (!(vd.uFlags & D3D_SVF_USED)) continue;
             std::string n = Lower(vd.Name);
+            { std::string& names = g_psNames[*out]; if (names.size() < 160) { if (!names.empty()) names += ' '; names += vd.Name; } }
             static const std::unordered_map<std::string, float> fixed = LoadFixedOverrides();
             auto fx = fixed.find(n);
             if (fx != fixed.end())
@@ -829,9 +840,10 @@ static void TraceDraw(ID3D11DeviceContext* self, UINT count)
     auto it = g_offsets.find(st.currentVS);
     int vsId = it != g_offsets.end() ? it->second.id : -1;
     bool cam = it != g_offsets.end() && !it->second.patches.empty();
-    Log("[uitrace] #%d vs %d %s rt %p%s %ux%u vp %.0f,%.0f %.0fx%.0f count %u ps %p",
+    auto pn = g_psNames.find(st.currentPS);
+    Log("[uitrace] #%d vs %d %s rt %p%s %ux%u vp %.0f,%.0f %.0fx%.0f count %u ps %p [%s]",
         g_traceN++, vsId, cam ? "3D" : "--", res, res && res == g_backbuffer ? " (SWAPCHAIN)" : "", w, h,
-        vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, count, st.currentPS);
+        vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, count, st.currentPS, pn != g_psNames.end() ? pn->second.c_str() : "");
     if (it != g_offsets.end() && it->second.hasMVP)
     {
         auto sh = g_cbShadow.find(st.currentSlot0CB);
