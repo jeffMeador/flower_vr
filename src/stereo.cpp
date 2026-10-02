@@ -424,6 +424,27 @@ void StereoPatchClip(float* m)
     memcpy(m, &out, 64);
 }
 
+bool StereoHasEyePoses()
+{
+    return g_activePoses[0].set && g_activePoses[1].set && g_display[0].set && g_display[1].set;
+}
+
+bool StereoProjectRefPoint(int eye, const float p[3], float* ox, float* oy)
+{
+    eye = eye ? 1 : 0;
+    const EyePose& e = g_activePoses[eye];
+    const DisplayFov& d = g_display[eye];
+    if (!e.set || !d.set) return false;
+    // Into the eye's frame (OpenXR: x right, y up, z back): d_e = R^T (p - pos).
+    float v[3] = { p[0] - e.pos[0], p[1] - e.pos[1], p[2] - e.pos[2] }, q[3];
+    for (int i = 0; i < 3; ++i) q[i] = e.rot[0 * 3 + i] * v[0] + e.rot[1 * 3 + i] * v[1] + e.rot[2 * 3 + i] * v[2];
+    if (q[2] > -0.01f) return false; // behind the eye
+    float tx = q[0] / -q[2], ty = q[1] / -q[2];
+    *ox = d.cropX * (2.0f * tx - (d.tanR + d.tanL)) / (d.tanR - d.tanL);
+    *oy = d.cropY * (2.0f * ty - (d.tanU + d.tanD)) / (d.tanU - d.tanD);
+    return true;
+}
+
 bool StereoMapNdc(int eye, float x, float y, float* ox, float* oy)
 {
     if (StereoPatchKey() == 0) return false;

@@ -92,6 +92,12 @@ void StereoPatchClip(float* m);
 // Where a point at (x, y) on the game's screen (NDC, far away) lands on an
 // eye's screen (NDC). False while no 3D camera is live.
 bool StereoMapNdc(int eye, float x, float y, float* ox, float* oy);
+// Where a point in the headset's reference space (meters, OpenXR axes: x right,
+// y up, z back; the game camera looks along -z) lands on an eye's screen (NDC),
+// using that eye's tracked pose and display FOV. False without them or if the
+// point is behind the eye.
+bool StereoProjectRefPoint(int eye, const float p[3], float* ox, float* oy);
+bool StereoHasEyePoses(); // both eyes' tracked poses and display FOVs are known
 void StereoPatchView(float* m);
 
 // World-space offset of the current eye from the game camera (for

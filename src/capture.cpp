@@ -39,6 +39,7 @@ struct ShaderOffsets
     bool hasLensMaxR = false; UINT lensMaxROffset = 0;
     UINT cbSize = 0;
     int  id = 0;
+    unsigned long long dxbc = 0; // DXBC checksum: identifies a game shader across runs
 };
 
 // CPU-side copy of what the game last wrote into a (small) constant buffer.
@@ -254,11 +255,12 @@ static void ReflectAndCacheOffsets(ID3D11VertexShader* shader, const void* bytec
     }
     offsets.patches.swap(kept);
 
-    g_offsets[shader] = offsets;
     // DXBC checksum (bytes 4..11) identifies the game's .cso file offline.
     const uint8_t* bc = static_cast<const uint8_t*>(bytecode);
     unsigned long long sum = 0;
     if (len >= 12) memcpy(&sum, bc + 4, 8);
+    offsets.dxbc = sum;
+    g_offsets[shader] = offsets;
     Log("[capture] shader #%d reflected: cbSize=%u model=%d mvp=%d patches=%zu [%s] dxbc %016llX",
         offsets.id, offsets.cbSize, offsets.hasModel, offsets.hasMVP, offsets.patches.size(), names.c_str(), sum);
 }
@@ -868,9 +870,69 @@ static void TraceDraw(ID3D11DeviceContext* self, UINT count)
 // straight ahead of the (head-turned) game camera. Nothing changes while the
 // game's own view is narrower than that (e.g. on the desktop).
 static int g_swapDraws = 0; // draws onto the swap chain this frame
+
+// Journey's menu draws its text and, as a single quad, the animated "singing"
+// logo with the same UI vertex shader (DXBC 657F594D94A6C203). In VR the logo
+// floated oddly over the menu; [xr] hideMenuLogo=1 (default) skips that quad.
+static bool HiddenMenuLogo(ID3D11DeviceContext* self)
+{
+    static int hide = -1;
+    if (hide < 0)
+    {
+        extern wchar_t g_dllDir[MAX_PATH];
+        wchar_t ini[MAX_PATH];
+        swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
+        hide =wcscmp(Game().name, L"Journey") == 0 && GetPrivateProfileIntW(L"xr", L"hideMenuLogo", 1, ini) != 0;
+    }
+    if (!hide) return false;
+    auto off = g_offsets.find(g_contextState[self].currentVS);
+    return off != g_offsets.end() && off->second.dxbc == 0x657F594D94A6C203ull;
+}
 static const float kUiHalfAngleTan = 0.5774f; // tan(30 deg): a 60 degree wide screen
 
-static bool UiViewports(ID3D11DeviceContext* self, D3D11_VIEWPORT eyeVp[2], D3D11_VIEWPORT& orig)
+// The sign: the 2D layer drawn as a square board standing in the room, fixed to
+// the game camera's frame (not the head), menuDistance ahead, menuHeight above
+// eye level, menuSize wide (meters; [xr] in vrmod.ini). Each eye draws it into
+// the rectangle its four corners project to (always facing the viewer).
+static float g_menuDist = 2.5f, g_menuSize = 2.5f, g_menuHeight = -0.15f;
+static void LoadMenuSign()
+{
+    static bool loaded = false;
+    if (loaded) return;
+    loaded = true;
+    extern wchar_t g_dllDir[MAX_PATH];
+    wchar_t ini[MAX_PATH], buf[32];
+    swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
+    GetPrivateProfileStringW(L"xr", L"menuDistance", L"2.5", buf, 32, ini); g_menuDist = (float)_wtof(buf);
+    GetPrivateProfileStringW(L"xr", L"menuSize", L"2.5", buf, 32, ini); g_menuSize = (float)_wtof(buf);
+    GetPrivateProfileStringW(L"xr", L"menuHeight", L"-0.15", buf, 32, ini); g_menuHeight = (float)_wtof(buf);
+    Log("[ui] menu sign: %.2f m ahead, %.2f m wide, %.2f m height", g_menuDist, g_menuSize, g_menuHeight);
+}
+
+// One eye's sign rectangle in pixels of the viewport v. False: no headset data
+// (the caller falls back); *visible false: the sign is behind this eye.
+static bool SignViewport(int eye, const D3D11_VIEWPORT& v, D3D11_VIEWPORT& out, bool* visible)
+{
+    if (!StereoHasEyePoses()) return false;
+    const float h = g_menuSize * 0.5f;
+    float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
+    *visible = true;
+    for (int c = 0; c < 4; ++c)
+    {
+        const float p[3] = { (c & 1) ? h : -h, g_menuHeight + ((c & 2) ? h : -h), -g_menuDist };
+        float nx, ny;
+        if (!StereoProjectRefPoint(eye, p, &nx, &ny)) { *visible = false; return true; }
+        minX = fminf(minX, nx); maxX = fmaxf(maxX, nx); minY = fminf(minY, ny); maxY = fmaxf(maxY, ny);
+    }
+    out = v;
+    out.TopLeftX = v.TopLeftX + (minX + 1.0f) * 0.5f * v.Width;
+    out.TopLeftY = v.TopLeftY + (1.0f - maxY) * 0.5f * v.Height;
+    out.Width = (maxX - minX) * 0.5f * v.Width;
+    out.Height = (maxY - minY) * 0.5f * v.Height;
+    return true;
+}
+
+static bool UiViewports(ID3D11DeviceContext* self, D3D11_VIEWPORT eyeVp[2], bool visible[2], D3D11_VIEWPORT& orig)
 {
     if (!g_backbuffer || wcscmp(Game().name, L"Journey") != 0) return false;
     ID3D11RenderTargetView* rtv = nullptr;
@@ -887,15 +949,26 @@ static bool UiViewports(ID3D11DeviceContext* self, D3D11_VIEWPORT eyeVp[2], D3D1
     // already puts them right. Only camera-less draws (the 2D layer) move.
     auto off = g_offsets.find(g_contextState[self].currentVS);
     if (off != g_offsets.end() && !off->second.patches.empty()) return false;
+    UINT n = 1;
+    self->RSGetViewports(&n, &orig);
+    if (n == 0 || orig.Width < 1) return false;
+    LoadMenuSign();
+    if (SignViewport(0, orig, eyeVp[0], &visible[0]) && SignViewport(1, orig, eyeVp[1], &visible[1]))
+    {
+        static int logged = 0;
+        if (logged++ < 3)
+            Log("[ui] 2D layer -> menu sign: left %.0f,%.0f %.0fx%.0f%s right %.0f,%.0f %.0fx%.0f%s",
+                eyeVp[0].TopLeftX, eyeVp[0].TopLeftY, eyeVp[0].Width, eyeVp[0].Height, visible[0] ? "" : " (behind)",
+                eyeVp[1].TopLeftX, eyeVp[1].TopLeftY, eyeVp[1].Width, eyeVp[1].Height, visible[1] ? "" : " (behind)");
+        return true;
+    }
+    // No headset data (desktop): a centered virtual screen kUiHalfAngle wide.
     float xs, ys;
     if (!StereoProjection(xs, ys)) return false;
     float sx = kUiHalfAngleTan * xs, sy = kUiHalfAngleTan * ys; // virtual screen in game NDC
     if (sx >= 1.0f && sy >= 1.0f) return false;
     if (sx > 1.0f) sx = 1.0f;
     if (sy > 1.0f) sy = 1.0f;
-    UINT n = 1;
-    self->RSGetViewports(&n, &orig);
-    if (n == 0 || orig.Width < 1) return false;
     for (int e = 0; e < 2; ++e)
     {
         float x0, y0, x1, y1;
@@ -905,10 +978,11 @@ static bool UiViewports(ID3D11DeviceContext* self, D3D11_VIEWPORT eyeVp[2], D3D1
         eyeVp[e].TopLeftY = orig.TopLeftY + (1.0f - fmaxf(y0, y1)) * 0.5f * orig.Height;
         eyeVp[e].Width = fabsf(x1 - x0) * 0.5f * orig.Width;
         eyeVp[e].Height = fabsf(y1 - y0) * 0.5f * orig.Height;
+        visible[e] = true;
     }
     static int logged = 0;
     if (logged++ < 3)
-        Log("[ui] 2D overlay -> virtual screen: left %.0f,%.0f %.0fx%.0f right %.0f,%.0f %.0fx%.0f (of %.0fx%.0f)",
+        Log("[ui] 2D layer -> virtual screen: left %.0f,%.0f %.0fx%.0f right %.0f,%.0f %.0fx%.0f (of %.0fx%.0f)",
             eyeVp[0].TopLeftX, eyeVp[0].TopLeftY, eyeVp[0].Width, eyeVp[0].Height,
             eyeVp[1].TopLeftX, eyeVp[1].TopLeftY, eyeVp[1].Width, eyeVp[1].Height, orig.Width, orig.Height);
     return true;
@@ -919,8 +993,10 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
 {
     if (self != g_immediateCtx) { draw(self); return; } // e.g. the mirror's own deferred context
     if (g_uiTrace) TraceDraw(self, count);
+    if (count == 6 && HiddenMenuLogo(self)) return;
     D3D11_VIEWPORT uiVp[2], uiOrig;
-    if (!ShadowBypassed() && StereoPatchKey() != 0 && UiViewports(self, uiVp, uiOrig))
+    bool uiVis[2] = { true, true };
+    if (!ShadowBypassed() && StereoPatchKey() != 0 && UiViewports(self, uiVp, uiVis, uiOrig))
     {
         // 2D overlay: each eye's virtual-screen viewport, then the game's back.
         StereoSetRenderEye(0);
@@ -929,7 +1005,7 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
         {
             ShadowBypass g;
             self->RSSetViewports(1, &uiVp[0]);
-            draw(self);
+            if (uiVis[0]) draw(self);
             self->RSSetViewports(1, &uiOrig);
         }
         if (Stereo().doubleRender && MirrorActive() && MirrorRightOutputsValid())
@@ -941,7 +1017,7 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
             {
                 ShadowBypass g;
                 r->RSSetViewports(1, &uiVp[1]);
-                draw(r);
+                if (uiVis[1]) draw(r);
                 r->RSSetViewports(1, &uiOrig);
             }
             MirrorNoteDraw();
