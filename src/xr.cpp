@@ -1315,7 +1315,18 @@ static DWORD WINAPI ProbeThread(LPVOID)
         }
         if (logged) Log("[xr] SteamVR compositor is running; connecting");
     }
-    while (!CreateInstance()) Sleep(5000);
+    // The first attempt starts SteamVR, like any VR game. Without a headset
+    // SteamVR quits ~10 s later, and retrying blindly relaunched it every
+    // ~20 s, which the Steam Frame's link could never attach to. So after a
+    // failure, retry only while SteamVR's compositor runs (a headset is up).
+    bool first = true;
+    while (!CreateInstance())
+    {
+        if (first && !RunningUnderWine()) Log("[xr] SteamVR has no headset yet; waiting for it (not restarting SteamVR)");
+        first = false;
+        Sleep(5000);
+        while (!RunningUnderWine() && !ProcessRunning(L"vrcompositor.exe")) Sleep(2000);
+    }
     while (!GetSystem()) Sleep(2000);
     InterlockedExchange(&g_probeReady, 1); // publishes g_instance, g_system and the function pointers
     return 0;
