@@ -92,10 +92,10 @@ static std::unordered_map<std::string, float> LoadFixedOverrides()
     if (!wcscmp(Game().name, L"Journey"))
     {
         // Journey's depth of field (blur strength from depth: nearScale/farScale)
-        // smeared the intro in VR, and its heat shimmer (heatScale) distorts the
-        // whole view. Off by default; [stereo] journeyDof=1 / heatShimmer=1 keep them.
+        // smeared the intro in VR: off by default ([stereo] journeyDof=1 keeps it).
+        // The heat shimmer (heatScale) stays on; [stereo] heatShimmer=0 turns it off.
         if (!GetPrivateProfileIntW(L"stereo", L"journeyDof", 0, ini)) { m["nearscale"] = 0.0f; m["farscale"] = 0.0f; }
-        if (!GetPrivateProfileIntW(L"stereo", L"heatShimmer", 0, ini)) m["heatscale"] = 0.0f;
+        if (!GetPrivateProfileIntW(L"stereo", L"heatShimmer", 1, ini)) m["heatscale"] = 0.0f;
         Log("[capture] Journey: depth of field %s, heat shimmer %s", m.count("farscale") ? "off" : "on", m.count("heatscale") ? "off" : "on");
     }
     wchar_t buf[4096] = {};
