@@ -4,9 +4,7 @@
 #include "keys.h"
 #include "stereo.h"
 #include "shadow.h"
-#include "vhook.h"
 #include <Windows.h>
-#include <TlHelp32.h>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -46,6 +44,7 @@ enum class XrStage { Off, NeedInstance, NeedSystem, Running, Failed };
 static XrStage g_stage = XrStage::Off;
 static ID3D11Device* g_device = nullptr;
 static wchar_t g_loaderPath[MAX_PATH] = {};
+static DWORD g_nextRetry = 0;
 
 static XrInstance g_instance = XR_NULL_HANDLE;
 static XrSystemId g_system = XR_NULL_SYSTEM_ID;
@@ -1281,57 +1280,6 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
         if (errs++ < 10) Log("[xr] xrEndFrame failed: %s", ResultStr(r));
     }
 }
-// Background: instance (every 5 s), then system (every 2 s), until both exist.
-static HANDLE g_probeThread = nullptr;
-static volatile LONG g_probeReady = 0;
-// Asking OpenXR for an instance starts SteamVR if it isn't running, like any
-// VR game. That only reaches a Steam Link headset when the game was started by
-// Steam (which passes the link session, VTE_CLIENT_SESSION_ID); started from
-// its exe, SteamVR came up with a "Disconnected VRLink Headset" and the game
-// ran flat. [xr] waitForSteamVR=1: never start SteamVR, connect only once its
-// compositor runs (SteamVR up with a headset). Not under Wine (the Steam
-// Frame's own runtime has no such process).
-static bool ProcessRunning(const wchar_t* exe)
-{
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return true; // can't tell: don't block
-    PROCESSENTRY32W pe = { sizeof(pe) };
-    bool found = false;
-    for (BOOL ok = Process32FirstW(snap, &pe); ok && !found; ok = Process32NextW(snap, &pe))
-        found = _wcsicmp(pe.szExeFile, exe) == 0;
-    CloseHandle(snap);
-    return found;
-}
-
-static DWORD WINAPI ProbeThread(LPVOID)
-{
-    if (GetPrivateProfileIntW(L"xr", L"waitForSteamVR", 0, g_iniPath) && !RunningUnderWine())
-    {
-        bool logged = false;
-        while (!ProcessRunning(L"vrcompositor.exe"))
-        {
-            if (!logged) { Log("[xr] waiting for SteamVR with a headset (connect the headset first; the mod won't start SteamVR)"); logged = true; }
-            Sleep(2000);
-        }
-        if (logged) Log("[xr] SteamVR compositor is running; connecting");
-    }
-    // The first attempt starts SteamVR, like any VR game. Without a headset
-    // SteamVR quits ~10 s later, and retrying blindly relaunched it every
-    // ~20 s, which the Steam Frame's link could never attach to. So after a
-    // failure, retry only while SteamVR's compositor runs (a headset is up).
-    bool first = true;
-    while (!CreateInstance())
-    {
-        if (first && !RunningUnderWine()) Log("[xr] SteamVR has no headset yet; waiting for it (not restarting SteamVR)");
-        first = false;
-        Sleep(5000);
-        while (!RunningUnderWine() && !ProcessRunning(L"vrcompositor.exe")) Sleep(2000);
-    }
-    while (!GetSystem()) Sleep(2000);
-    InterlockedExchange(&g_probeReady, 1); // publishes g_instance, g_system and the function pointers
-    return 0;
-}
-
 void XrSubmitFrame(IDXGISwapChain* swapChain, int renderedEye)
 {
     switch (g_stage)
@@ -1341,17 +1289,16 @@ void XrSubmitFrame(IDXGISwapChain* swapChain, int renderedEye)
         return;
     case XrStage::NeedInstance:
         if (!xrGetInstanceProcAddr_ && !LoadLoader()) { g_stage = XrStage::Failed; return; }
-        // xrCreateInstance / xrGetSystem can block for many seconds while SteamVR
-        // starts or has no headset; on the render thread that froze the game.
-        // They don't touch D3D, so they retry on a background thread.
-        if (!g_probeThread) g_probeThread = CreateThread(nullptr, 0, ProbeThread, nullptr, 0, nullptr);
-        if (InterlockedCompareExchange(&g_probeReady, 0, 0) == 0) return;
-        WaitForSingleObject(g_probeThread, INFINITE);
-        CloseHandle(g_probeThread);
-        g_probeThread = nullptr;
+        if (GetTickCount() < g_nextRetry) return;
+        g_nextRetry = GetTickCount() + 5000;
+        if (!CreateInstance()) return;
+        g_nextRetry = 0;
         g_stage = XrStage::NeedSystem;
         // fallthrough
     case XrStage::NeedSystem:
+        if (GetTickCount() < g_nextRetry) return;
+        g_nextRetry = GetTickCount() + 2000;
+        if (!GetSystem()) return;
         if (!CreateSession(swapChain)) { g_stage = XrStage::Failed; return; }
         g_stage = XrStage::Running;
         // fallthrough
