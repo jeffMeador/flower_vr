@@ -832,14 +832,25 @@ static void TraceDraw(ID3D11DeviceContext* self, UINT count)
     Log("[uitrace] #%d vs %d %s rt %p%s %ux%u vp %.0f,%.0f %.0fx%.0f count %u ps %p",
         g_traceN++, vsId, cam ? "3D" : "--", res, res && res == g_backbuffer ? " (SWAPCHAIN)" : "", w, h,
         vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, count, st.currentPS);
+    if (it != g_offsets.end() && it->second.hasMVP)
+    {
+        auto sh = g_cbShadow.find(st.currentSlot0CB);
+        if (sh != g_cbShadow.end() && sh->second.valid && it->second.mvpOffset + 64 <= sh->second.data.size())
+        {
+            const float* m = reinterpret_cast<const float*>(sh->second.data.data() + it->second.mvpOffset);
+            Log("[uitrace]     mvp [%.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f]",
+                m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
+        }
+    }
     if (res) res->Release();
     if (rtv) rtv->Release();
 }
 
-// Journey's 2D overlays (menu text, title, tutorial prompts) are drawn onto
-// the swap chain after the frame's first draw there (the 3D scene composite):
-// the UI layer in one full-screen draw, the prompts as flat-projected quads.
-// Left as they are they land on the same pixels of both eyes' images, which
+// Journey's 2D layer (menu text, title) is drawn into its own target and put
+// onto the swap chain in one camera-less full-screen draw after the frame's
+// first draw there (the 3D scene composite). Quads drawn there with the
+// scene camera (white fades, glows) are world-space and stay as they are.
+// Left as it is the 2D layer lands on the same pixels of both eyes' images, which
 // look in different directions - double and unreadable. Each eye draws them
 // into a viewport that is the same virtual screen, kUiHalfAngle wide each way,
 // straight ahead of the (head-turned) game camera. Nothing changes while the
@@ -859,6 +870,11 @@ static bool UiViewports(ID3D11DeviceContext* self, D3D11_VIEWPORT eyeVp[2], D3D1
     if (res) res->Release();
     rtv->Release();
     if (!swap || g_swapDraws++ == 0) return false; // the first one is the scene composite
+    // Draws with camera data are world-space quads (the intro's white fade,
+    // glows, prompt icons placed in front of the camera): the stereo patch
+    // already puts them right. Only camera-less draws (the 2D layer) move.
+    auto off = g_offsets.find(g_contextState[self].currentVS);
+    if (off != g_offsets.end() && !off->second.patches.empty()) return false;
     float xs, ys;
     if (!StereoProjection(xs, ys)) return false;
     float sx = kUiHalfAngleTan * xs, sy = kUiHalfAngleTan * ys; // virtual screen in game NDC
