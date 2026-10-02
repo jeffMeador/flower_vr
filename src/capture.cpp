@@ -5,6 +5,8 @@
 #include "shadow.h"
 #include "mirror.h"
 #include "vhook.h"
+#include "game.h"
+#include <cmath>
 #include <d3d11shader.h>
 #include <d3dcompiler.h>
 #include <unordered_map>
@@ -798,10 +800,127 @@ static bool SkippedShader(ID3D11DeviceContext* self)
     return it != g_offsets.end() && g_skipVS.count(it->second.id);
 }
 
+// UI trace (diagnostic): a file named vrmod_uitrace next to the DLL logs every
+// draw of the next frame - shader ids, whether it carries camera data, its
+// render target (is it the swap chain?), viewport and vertex count - to tell
+// 2D overlay draws from the 3D scene and post passes. The file is removed.
+static ID3D11Resource* g_backbuffer = nullptr; // not AddRef'd; compared by address only
+static bool g_uiTrace = false;
+static int g_traceN = 0;
+void CaptureSetBackbuffer(ID3D11Resource* bb) { g_backbuffer = bb; }
+
+static void TraceDraw(ID3D11DeviceContext* self, UINT count)
+{
+    ID3D11RenderTargetView* rtv = nullptr;
+    self->OMGetRenderTargets(1, &rtv, nullptr);
+    ID3D11Resource* res = nullptr;
+    UINT w = 0, h = 0;
+    if (rtv)
+    {
+        rtv->GetResource(&res);
+        D3D11_RESOURCE_DIMENSION dim;
+        res->GetType(&dim);
+        if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) { D3D11_TEXTURE2D_DESC d; static_cast<ID3D11Texture2D*>(res)->GetDesc(&d); w = d.Width; h = d.Height; }
+    }
+    D3D11_VIEWPORT vp = {};
+    UINT nvp = 1;
+    self->RSGetViewports(&nvp, &vp);
+    ContextState& st = g_contextState[self];
+    auto it = g_offsets.find(st.currentVS);
+    int vsId = it != g_offsets.end() ? it->second.id : -1;
+    bool cam = it != g_offsets.end() && !it->second.patches.empty();
+    Log("[uitrace] #%d vs %d %s rt %p%s %ux%u vp %.0f,%.0f %.0fx%.0f count %u ps %p",
+        g_traceN++, vsId, cam ? "3D" : "--", res, res && res == g_backbuffer ? " (SWAPCHAIN)" : "", w, h,
+        vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, count, st.currentPS);
+    if (res) res->Release();
+    if (rtv) rtv->Release();
+}
+
+// Journey's 2D overlays (menu text, title, tutorial prompts) are drawn onto
+// the swap chain after the frame's first draw there (the 3D scene composite):
+// the UI layer in one full-screen draw, the prompts as flat-projected quads.
+// Left as they are they land on the same pixels of both eyes' images, which
+// look in different directions - double and unreadable. Each eye draws them
+// into a viewport that is the same virtual screen, kUiHalfAngle wide each way,
+// straight ahead of the (head-turned) game camera. Nothing changes while the
+// game's own view is narrower than that (e.g. on the desktop).
+static int g_swapDraws = 0; // draws onto the swap chain this frame
+static const float kUiHalfAngleTan = 0.5774f; // tan(30 deg): a 60 degree wide screen
+
+static bool UiViewports(ID3D11DeviceContext* self, D3D11_VIEWPORT eyeVp[2], D3D11_VIEWPORT& orig)
+{
+    if (!g_backbuffer || wcscmp(Game().name, L"Journey") != 0) return false;
+    ID3D11RenderTargetView* rtv = nullptr;
+    self->OMGetRenderTargets(1, &rtv, nullptr);
+    if (!rtv) return false;
+    ID3D11Resource* res = nullptr;
+    rtv->GetResource(&res);
+    bool swap = res == g_backbuffer;
+    if (res) res->Release();
+    rtv->Release();
+    if (!swap || g_swapDraws++ == 0) return false; // the first one is the scene composite
+    float xs, ys;
+    if (!StereoProjection(xs, ys)) return false;
+    float sx = kUiHalfAngleTan * xs, sy = kUiHalfAngleTan * ys; // virtual screen in game NDC
+    if (sx >= 1.0f && sy >= 1.0f) return false;
+    if (sx > 1.0f) sx = 1.0f;
+    if (sy > 1.0f) sy = 1.0f;
+    UINT n = 1;
+    self->RSGetViewports(&n, &orig);
+    if (n == 0 || orig.Width < 1) return false;
+    for (int e = 0; e < 2; ++e)
+    {
+        float x0, y0, x1, y1;
+        if (!StereoMapNdc(e, -sx, -sy, &x0, &y0) || !StereoMapNdc(e, sx, sy, &x1, &y1)) return false;
+        eyeVp[e] = orig;
+        eyeVp[e].TopLeftX = orig.TopLeftX + (fminf(x0, x1) + 1.0f) * 0.5f * orig.Width;
+        eyeVp[e].TopLeftY = orig.TopLeftY + (1.0f - fmaxf(y0, y1)) * 0.5f * orig.Height;
+        eyeVp[e].Width = fabsf(x1 - x0) * 0.5f * orig.Width;
+        eyeVp[e].Height = fabsf(y1 - y0) * 0.5f * orig.Height;
+    }
+    static int logged = 0;
+    if (logged++ < 3)
+        Log("[ui] 2D overlay -> virtual screen: left %.0f,%.0f %.0fx%.0f right %.0f,%.0f %.0fx%.0f (of %.0fx%.0f)",
+            eyeVp[0].TopLeftX, eyeVp[0].TopLeftY, eyeVp[0].Width, eyeVp[0].Height,
+            eyeVp[1].TopLeftX, eyeVp[1].TopLeftY, eyeVp[1].Width, eyeVp[1].Height, orig.Width, orig.Height);
+    return true;
+}
+
 template <class F>
-static void StereoDraw(ID3D11DeviceContext* self, F&& draw)
+static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
 {
     if (self != g_immediateCtx) { draw(self); return; } // e.g. the mirror's own deferred context
+    if (g_uiTrace) TraceDraw(self, count);
+    D3D11_VIEWPORT uiVp[2], uiOrig;
+    if (!ShadowBypassed() && StereoPatchKey() != 0 && UiViewports(self, uiVp, uiOrig))
+    {
+        // 2D overlay: each eye's virtual-screen viewport, then the game's back.
+        StereoSetRenderEye(0);
+        PrepareDraw(self);
+        PreparePixel(self);
+        {
+            ShadowBypass g;
+            self->RSSetViewports(1, &uiVp[0]);
+            draw(self);
+            self->RSSetViewports(1, &uiOrig);
+        }
+        if (Stereo().doubleRender && MirrorActive() && MirrorRightOutputsValid())
+        {
+            ID3D11DeviceContext* r = MirrorContext();
+            StereoSetRenderEye(1);
+            PrepareDrawRight();
+            PreparePixelRight();
+            {
+                ShadowBypass g;
+                r->RSSetViewports(1, &uiVp[1]);
+                draw(r);
+                r->RSSetViewports(1, &uiOrig);
+            }
+            MirrorNoteDraw();
+            StereoSetRenderEye(0);
+        }
+        return;
+    }
     if (SkippedShader(self)) return;
     if (!Stereo().doubleRender || ShadowBypassed())
     {
@@ -842,27 +961,36 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw)
 static void STDMETHODCALLTYPE Hook_DrawIndexed(ID3D11DeviceContext* self, UINT count, UINT start, INT base)
 {
     g_countDrawIndexed++;
-    StereoDraw(self, [&](ID3D11DeviceContext* c) { if (c == self) g_realDrawIndexed(c, count, start, base); else c->DrawIndexed(count, start, base); });
+    StereoDraw(self, [&](ID3D11DeviceContext* c) { if (c == self) g_realDrawIndexed(c, count, start, base); else c->DrawIndexed(count, start, base); }, count);
 }
 static void STDMETHODCALLTYPE Hook_Draw(ID3D11DeviceContext* self, UINT count, UINT start)
 {
     g_countDraw++;
-    StereoDraw(self, [&](ID3D11DeviceContext* c) { if (c == self) g_realDraw(c, count, start); else c->Draw(count, start); });
+    StereoDraw(self, [&](ID3D11DeviceContext* c) { if (c == self) g_realDraw(c, count, start); else c->Draw(count, start); }, count);
 }
 static void STDMETHODCALLTYPE Hook_DrawIndexedInstanced(ID3D11DeviceContext* self, UINT ipc, UINT ic, UINT sil, INT bvl, UINT sii)
 {
     g_countDrawIndexedInstanced++;
-    StereoDraw(self, [&](ID3D11DeviceContext* c) { if (c == self) g_realDrawIndexedInstanced(c, ipc, ic, sil, bvl, sii); else c->DrawIndexedInstanced(ipc, ic, sil, bvl, sii); });
+    StereoDraw(self, [&](ID3D11DeviceContext* c) { if (c == self) g_realDrawIndexedInstanced(c, ipc, ic, sil, bvl, sii); else c->DrawIndexedInstanced(ipc, ic, sil, bvl, sii); }, ipc * ic);
 }
 static void STDMETHODCALLTYPE Hook_DrawInstanced(ID3D11DeviceContext* self, UINT vpi, UINT ic, UINT sv, UINT si)
 {
     g_countDrawInstanced++;
-    StereoDraw(self, [&](ID3D11DeviceContext* c) { if (c == self) g_realDrawInstanced(c, vpi, ic, sv, si); else c->DrawInstanced(vpi, ic, sv, si); });
+    StereoDraw(self, [&](ID3D11DeviceContext* c) { if (c == self) g_realDrawInstanced(c, vpi, ic, sv, si); else c->DrawInstanced(vpi, ic, sv, si); }, vpi * ic);
 }
 void NotifyCaptureFrameBoundary()
 {
     uint64_t f = g_captureFrame.fetch_add(1);
     g_vpObservedThisFrame = false;
+    g_swapDraws = 0;
+    if (g_uiTrace) { g_uiTrace = false; Log("[uitrace] end of frame (%d draws)", g_traceN); }
+    if ((f % 30) == 0)
+    {
+        extern wchar_t g_dllDir[MAX_PATH];
+        wchar_t trig[MAX_PATH];
+        swprintf_s(trig, L"%s\\vrmod_uitrace", g_dllDir);
+        if (GetFileAttributesW(trig) != INVALID_FILE_ATTRIBUTES && DeleteFileW(trig)) { g_uiTrace = true; g_traceN = 0; Log("[uitrace] tracing the next frame"); }
+    }
     StereoFrameBoundary();
 
     if ((f % 180) == 0)

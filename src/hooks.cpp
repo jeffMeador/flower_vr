@@ -289,6 +289,10 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
         This->GetDesc(&scd);
         if (scd.BufferDesc.Height) CamFindTick((float)scd.BufferDesc.Width / scd.BufferDesc.Height);
     }
+    {
+        ID3D11Resource* bb = nullptr;
+        if (SUCCEEDED(This->GetBuffer(0, __uuidof(ID3D11Resource), (void**)&bb)) && bb) { CaptureSetBackbuffer(bb); bb->Release(); }
+    }
     NotifyCaptureFrameBoundary();
 
     if (frame == 0)

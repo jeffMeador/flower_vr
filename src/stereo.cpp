@@ -424,6 +424,28 @@ void StereoPatchClip(float* m)
     memcpy(m, &out, 64);
 }
 
+bool StereoMapNdc(int eye, float x, float y, float* ox, float* oy)
+{
+    if (StereoPatchKey() == 0) return false;
+    eye = eye ? 1 : 0;
+    if (g_kKey[eye] != g_key)
+    {
+        int saved = g_renderEye;
+        g_renderEye = eye;
+        BuildK();
+        g_renderEye = saved;
+    }
+    // A far point (NDC depth ~1) on the game's screen at (x, y): c' = K c.
+    const float c[4] = { x, y, 0.999f, 1.0f };
+    float o[4] = {};
+    for (int i = 0; i < 4; ++i)
+        for (int k = 0; k < 4; ++k) o[i] += g_K[eye].m[i][k] * c[k];
+    if (o[3] <= 1e-6f) return false;
+    *ox = o[0] / o[3];
+    *oy = o[1] / o[3];
+    return true;
+}
+
 void StereoPatchView(float* m)
 {
     // modelView is in the game's own view space, whose axis signs we don't

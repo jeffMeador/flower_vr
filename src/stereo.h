@@ -89,6 +89,9 @@ uint64_t StereoPatchKey();
 // Rewrite a perspective clip matrix / a modelView matrix for the current eye,
 // in place (row-major float[16]).
 void StereoPatchClip(float* m);
+// Where a point at (x, y) on the game's screen (NDC, far away) lands on an
+// eye's screen (NDC). False while no 3D camera is live.
+bool StereoMapNdc(int eye, float x, float y, float* ox, float* oy);
 void StereoPatchView(float* m);
 
 // World-space offset of the current eye from the game camera (for
