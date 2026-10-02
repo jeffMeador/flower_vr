@@ -5,6 +5,7 @@
 #include <Windows.h>
 #include <MinHook.h>
 #include <cstring>
+#include <cmath>
 
 // Journey (Steam) camera object, found with the camfind watchpoints:
 //   +0x10  view matrix (3 float4s)        +0x40  projection (4 float4s)
@@ -35,7 +36,23 @@ static const uint8_t kUpdateViewBytes[] = { 0x48, 0x8B, 0xC4, 0x53, 0x48, 0x81, 
                                             0x28, 0x05, 0x5E, 0xEA, 0x2E, 0x00, 0x48, 0x8B, 0xD9, 0x0F, 0x28, 0x0D };
 using UpdateView_t = void*(__fastcall*)(uint8_t* view);
 static UpdateView_t realUpdateView;
+
+// Culling: each render pass sets up its camera in PassSetCamera(pass, &camera->view)
+// (0x34F4D0, three times a frame, after UpdateView) from the same world
+// transform, so the passes culled and picked terrain for the un-turned camera
+// (gaps and popping behind/around you). It gets this frame's turned transform
+// for the call too, restored right after; leaving it in place instead made
+// the game's camera logic build on the head (it drifted).
+static const uintptr_t kPassSetupRva = 0x34F4D0;
+static const uint8_t kPassSetupBytes[] = { 0x40, 0x53, 0x48, 0x81, 0xEC, 0xA0, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x82,
+                                           0xB0, 0x00, 0x00, 0x00, 0x48, 0x8B, 0xD9, 0x48, 0x89, 0x91, 0xB0, 0x00 };
+using PassSetup_t = void*(__fastcall*)(void* pass, uint8_t* view);
+static PassSetup_t realPassSetup;
+static float* g_frameWorld = nullptr;            // the transform turned this frame (null: none)
+static float g_frameOrig[12], g_frameTurned[12]; // the game's values and ours
 static bool g_headCamera = false;
+static float g_fakeYaw = 0.0f;  // [debug] fakeHeadYaw (degrees): a fixed head turn for desktop tests
+static bool g_noPassHook = false; // [debug] noPassHook=1: leave pass setup alone (A/B test)
 
 using UpdateProj_t = void*(__fastcall*)(uint8_t* cam);
 using SceneParams_t = void*(__fastcall*)(void* out, uint8_t* cam, void* a3, void* a4);
@@ -93,9 +110,23 @@ static void* __fastcall Hook_UpdateView(uint8_t* view)
     memcpy(w, packed, sizeof(packed));
     void* r = realUpdateView(view);
     memcpy(w, saved, sizeof(saved));
+    memcpy(g_frameOrig, saved, sizeof(saved));
+    memcpy(g_frameTurned, packed, sizeof(packed));
+    g_frameWorld = w;
 
     static DWORD lastLog = 0;
     if (GetTickCount() - lastLog > 10000) { lastLog = GetTickCount(); Log("[journeycam] head camera active"); }
+    return r;
+}
+
+static void* __fastcall Hook_PassSetup(void* pass, uint8_t* view)
+{
+    float* w = view ? *(float**)(view + 0xB0) : nullptr;
+    if (!g_enabled || !w || w != g_frameWorld || memcmp(w, g_frameOrig, sizeof(g_frameOrig)) != 0)
+        return realPassSetup(pass, view);
+    memcpy(w, g_frameTurned, sizeof(g_frameTurned));
+    void* r = realPassSetup(pass, view);
+    memcpy(w, g_frameOrig, sizeof(g_frameOrig));
     return r;
 }
 
@@ -111,6 +142,15 @@ bool JourneyCamInstall(float fovDegrees, bool headCamera)
     if (wcscmp(Game().name, L"Journey") != 0) return false;
     g_fov = fovDegrees;
     g_headCamera = headCamera;
+    {
+        extern wchar_t g_dllDir[MAX_PATH];
+        wchar_t ini[MAX_PATH], buf[32];
+        swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
+        GetPrivateProfileStringW(L"debug", L"fakeHeadYaw", L"0", buf, 32, ini);
+        g_fakeYaw = (float)_wtof(buf);
+        g_noPassHook = GetPrivateProfileIntW(L"debug", L"noPassHook", 0, ini) != 0;
+        if (g_fakeYaw != 0.0f) Log("[journeycam] DEBUG fake head yaw %.0f deg", g_fakeYaw);
+    }
     if (!Matches(kUpdateProjRva, kUpdateProjBytes, sizeof(kUpdateProjBytes)) ||
         !Matches(kSceneParamsRva, kSceneParamsBytes, sizeof(kSceneParamsBytes)))
     {
@@ -130,12 +170,23 @@ bool JourneyCamInstall(float fovDegrees, bool headCamera)
                   MH_CreateHook(base + kUpdateViewRva, (void*)&Hook_UpdateView, (void**)&realUpdateView) == MH_OK &&
                   MH_EnableHook(base + kUpdateViewRva) == MH_OK;
         Log("[journeycam] head camera hook %s", hv ? "installed" : "not installed (code not found)");
+        bool hp = hv && !g_noPassHook && Matches(kPassSetupRva, kPassSetupBytes, sizeof(kPassSetupBytes)) &&
+                  MH_CreateHook(base + kPassSetupRva, (void*)&Hook_PassSetup, (void**)&realPassSetup) == MH_OK &&
+                  MH_EnableHook(base + kPassSetupRva) == MH_OK;
+        Log("[journeycam] culling follows the head: %s", hp ? "yes (pass setup hooked)" : "no (code not found)");
     }
     return ok;
 }
 
 void JourneyCamTick(bool enable)
 {
+    g_frameWorld = nullptr; // Present: this frame's turned transform is used up
+    if (g_fakeYaw != 0.0f && enable)
+    {
+        const float a = g_fakeYaw * 3.14159265f / 180.0f, c = cosf(a), s = sinf(a);
+        const float rot[9] = { c, 0, s,  0, 1, 0,  -s, 0, c }, pos[3] = { 0, 0, 0 };
+        StereoSetHeadPose(rot, pos);
+    }
     if (enable != g_enabled) Log("[journeycam] FOV override %s", enable ? "on" : "off");
     if (!enable && g_enabled && g_headCamera) StereoHeadNotApplied(); // the shaders take the head again
     g_enabled = enable;
