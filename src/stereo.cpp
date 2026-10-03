@@ -572,7 +572,10 @@ bool StereoEyeRays(int eye, const float O[3], const float U[3], const float V[3]
         V2[k] = -2.0f * By2[k];
         O2[k] = A2[k] + Bx2[k] + By2[k];
         const float* e = g_eyeCanonPos[eye];
-        E2[k] = E[k] + M[k][0] * e[0] + M[k][1] * e[1] + M[k][2] * e[2];
+        // Minus: measured. With the plus sign the shadow's disparity came out
+        // exactly mirrored (-59 px vs the feet's +59 px at a 10x eye distance);
+        // with minus it sits under the feet in both eyes, head straight or turned.
+        E2[k] = E[k] - (M[k][0] * e[0] + M[k][1] * e[1] + M[k][2] * e[2]);
     }
     return true;
 }

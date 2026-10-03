@@ -888,7 +888,11 @@ void CaptureSetBackbuffer(ID3D11Resource* bb) { g_backbuffer = bb; }
 static void TraceDraw(ID3D11DeviceContext* self, UINT count)
 {
     ID3D11RenderTargetView* rtv = nullptr;
-    self->OMGetRenderTargets(1, &rtv, nullptr);
+    ID3D11DepthStencilView* dsvT = nullptr;
+    self->OMGetRenderTargets(1, &rtv, &dsvT);
+    ID3D11Resource* dsRes = nullptr;
+    if (dsvT) { dsvT->GetResource(&dsRes); dsvT->Release(); }
+    if (dsRes) dsRes->Release(); // address only
     ID3D11Resource* res = nullptr;
     UINT w = 0, h = 0;
     if (rtv)
@@ -906,8 +910,8 @@ static void TraceDraw(ID3D11DeviceContext* self, UINT count)
     int vsId = it != g_offsets.end() ? it->second.id : -1;
     bool cam = it != g_offsets.end() && !it->second.patches.empty();
     auto pn = g_psNames.find(st.currentPS);
-    Log("[uitrace] #%d vs %d %s rt %p%s %ux%u vp %.0f,%.0f %.0fx%.0f count %u ps %p [%s]",
-        g_traceN++, vsId, cam ? "3D" : "--", res, res && res == g_backbuffer ? " (SWAPCHAIN)" : "", w, h,
+    Log("[uitrace] #%d vs %d %s rt %p%s ds %p %ux%u vp %.0f,%.0f %.0fx%.0f count %u ps %p [%s]",
+        g_traceN++, vsId, cam ? "3D" : "--", res, res && res == g_backbuffer ? " (SWAPCHAIN)" : "", dsRes, w, h,
         vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, count, st.currentPS, pn != g_psNames.end() ? pn->second.c_str() : "");
     if (it != g_offsets.end() && it->second.hasMVP)
     {
@@ -1175,6 +1179,15 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
             UINT w, h; float alpha;
             GuiImageInfo(self, w, h, alpha);
             if (w > 16 && alpha > 0.05f) CinemaNotePrompt(); // a visible prompt (not a fade, not hidden)
+            {   // TEMP DIAG: visible GuiImages
+                static UINT lw = 0, lh = 0; static int n = 0;
+                if (alpha > 0.05f && (w != lw || h != lh) && n < 200)
+                {
+                    n++; lw = w; lh = h;
+                    D3D11_VIEWPORT v = {}; UINT nv = 1; self->RSGetViewports(&nv, &v);
+                    Log("[gui] visible GuiImage tex %ux%u alpha %.2f count %u vp %.0fx%.0f", w, h, alpha, count, v.Width, v.Height);
+                }
+            }
         }
         else
         {
