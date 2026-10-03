@@ -2,6 +2,7 @@
 #include "log.h"
 #include "mat4.h"
 #include "stereo.h"
+#include "cinema.h"
 #include "shadow.h"
 #include "mirror.h"
 #include "vhook.h"
@@ -86,6 +87,7 @@ struct PixelOverride
 };
 static std::unordered_map<ID3D11PixelShader*, std::vector<PixelOverride>> g_psOverrides;
 static std::unordered_map<ID3D11PixelShader*, std::string> g_psNames; // constant names, for vrmod_uitrace
+static std::unordered_map<ID3D11PixelShader*, std::pair<UINT, UINT>> g_psAlpha; // slot, offset of "Alpha" (GuiImage)
 
 // [psoverride] in vrmod.ini: <constant name>=<float>, lower-cased names. Pins any
 // pixel-shader constant while in stereo (for tuning another game's effects).
@@ -336,6 +338,7 @@ static HRESULT STDMETHODCALLTYPE Hook_CreatePixelShader(ID3D11Device* self, cons
             auto fx = fixed.find(n);
             if (fx != fixed.end())
                 ov.push_back({ PixelOverride::Fixed, bd.BindPoint, vd.StartOffset, fx->second });
+            if (n == "alpha") g_psAlpha[*out] = { bd.BindPoint, vd.StartOffset };
             if (n == "blurzranges")
             {
                 // Depth of field: blur = clamp(max((Z-x)*y, (Z-z)*w)): .y is the near
@@ -926,6 +929,7 @@ static void TraceDraw(ID3D11DeviceContext* self, UINT count)
 // straight ahead of the (head-turned) game camera. Nothing changes while the
 // game's own view is narrower than that (e.g. on the desktop).
 static int g_swapDraws = 0; // draws onto the swap chain this frame
+static int g_swapDrawsAll = 0; // the same, counted for every game draw (automatic cinema mode)
 
 // Journey's menu draws its text and, as a single quad, the animated "singing"
 // logo with the same UI vertex shader (DXBC 657F594D94A6C203). In VR the logo
@@ -1048,10 +1052,42 @@ static bool UiViewports(ID3D11DeviceContext* self, D3D11_VIEWPORT eyeVp[2], bool
 // Per-eye viewports for a GuiImage draw onto the swap chain: the game screen
 // mapped into each eye (StereoMapNdc), shifted to appear [xr] promptDistance
 // ahead (default 4 m: about where the character stands). False: not such a draw.
+// A GuiImage draw's texture size and its pixel shader's Alpha (-1: unknown).
+// Journey's screen fades (to black, to white: the intro, level changes, the
+// idle screen) are GuiImages too: a tiny solid texture stretched over the
+// whole screen.
+static void GuiImageInfo(ID3D11DeviceContext* self, UINT& w, UINT& h, float& alpha)
+{
+    w = h = 0; alpha = -1.0f;
+    ID3D11ShaderResourceView* srv = nullptr;
+    self->PSGetShaderResources(0, 1, &srv);
+    if (srv)
+    {
+        ID3D11Resource* r = nullptr;
+        srv->GetResource(&r);
+        D3D11_RESOURCE_DIMENSION dim;
+        if (r) { r->GetType(&dim); if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) { D3D11_TEXTURE2D_DESC td; static_cast<ID3D11Texture2D*>(r)->GetDesc(&td); w = td.Width; h = td.Height; } r->Release(); }
+        srv->Release();
+    }
+    ContextState& st = g_contextState[self];
+    auto a = g_psAlpha.find(st.currentPS);
+    if (a == g_psAlpha.end() || a->second.first >= 4) return;
+    auto sh = g_cbShadow.find(st.psCB[a->second.first]);
+    if (sh == g_cbShadow.end() || !sh->second.valid || a->second.second + 4 > sh->second.data.size()) return;
+    memcpy(&alpha, sh->second.data.data() + a->second.second, 4);
+}
+static bool IsScreenFill(ID3D11DeviceContext* self)
+{
+    UINT w, h; float alpha;
+    GuiImageInfo(self, w, h, alpha);
+    return w > 0 && w <= 16 && h <= 16;
+}
+
 static bool GuiImageViewports(ID3D11DeviceContext* self, D3D11_VIEWPORT vp[2], D3D11_VIEWPORT& orig)
 {
     auto off = g_offsets.find(g_contextState[self].currentVS);
     if (off == g_offsets.end() || !off->second.guiImage || !g_backbuffer || !StereoHasEyePoses()) return false;
+    if (IsScreenFill(self)) return false; // a screen fade: stays full screen in both eyes
     ID3D11RenderTargetView* rtv = nullptr;
     self->OMGetRenderTargets(1, &rtv, nullptr);
     if (!rtv) return false;
@@ -1104,6 +1140,34 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
     if (self != g_immediateCtx) { draw(self); return; } // e.g. the mirror's own deferred context
     if (g_uiTrace) TraceDraw(self, count);
     if (count == 6 && HiddenMenuLogo(self)) return;
+    if (!ShadowBypassed() && g_backbuffer && !wcscmp(Game().name, L"Journey"))
+    {
+        // Automatic cinema mode: the 2D layer (camera-less draws onto the swap
+        // chain after the scene composite) means a menu or title is up; a
+        // GuiImage (tutorial prompt) means you have control.
+        auto off = g_offsets.find(g_contextState[self].currentVS);
+        const bool gui = off != g_offsets.end() && off->second.guiImage;
+        if (gui)
+        {
+            UINT w, h; float alpha;
+            GuiImageInfo(self, w, h, alpha);
+            if (w > 16 && alpha > 0.05f) CinemaNotePrompt(); // a visible prompt (not a fade, not hidden)
+        }
+        else
+        {
+            ID3D11RenderTargetView* rtv = nullptr;
+            self->OMGetRenderTargets(1, &rtv, nullptr);
+            if (rtv)
+            {
+                ID3D11Resource* res = nullptr;
+                rtv->GetResource(&res);
+                if (res == g_backbuffer && g_swapDrawsAll++ > 0 && (off == g_offsets.end() || off->second.patches.empty()))
+                    CinemaNoteUiLayer();
+                if (res) res->Release();
+                rtv->Release();
+            }
+        }
+    }
     D3D11_VIEWPORT uiVp[2], uiOrig;
     bool uiVis[2] = { true, true };
     if (!ShadowBypassed() && StereoPatchKey() != 0 && UiViewports(self, uiVp, uiVis, uiOrig))
@@ -1235,6 +1299,7 @@ void NotifyCaptureFrameBoundary()
     uint64_t f = g_captureFrame.fetch_add(1);
     g_vpObservedThisFrame = false;
     g_swapDraws = 0;
+    g_swapDrawsAll = 0;
     if (g_uiTrace) { g_uiTrace = false; Log("[uitrace] end of frame (%d draws)", g_traceN); }
     if ((f % 30) == 0)
     {

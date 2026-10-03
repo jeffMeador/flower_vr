@@ -10,7 +10,13 @@
 // CinemaToggle switches at runtime (Journey: right thumbstick click).
 void CinemaInit(const wchar_t* ini);
 bool CinemaActive();
+float CinemaAspect(); // the screen's width / height
 void CinemaToggle();
+// Automatic mode inputs: the 2D layer (menu, title) was drawn / a tutorial
+// prompt was drawn (you have control). CinemaUpdate once per frame.
+void CinemaNoteUiLayer();
+void CinemaNotePrompt();
+void CinemaUpdate();
 // Once per Present, before the eyes go to the headset: replaces both eye
 // images with the screen when cinema mode is on.
 void CinemaCompose(IDXGISwapChain* swapChain, ID3D11DeviceContext* ctx);

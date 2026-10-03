@@ -8,4 +8,6 @@ bool JourneyCamInstall(float fovDegrees, bool headCamera);
 void JourneyCamTick(bool enable);
 float JourneyCamGameFov();
 // How far the scene camera moved last frame (game units); for debug captures.
-float JourneyCamSpeed(); // the game's own vertical FOV (degrees) while ours is in place; 0 if unknown // once per frame: on while a VR session is running
+float JourneyCamSpeed();
+// Cinema screen: widen the game's view to this aspect (0: off); the screen shows its middle band.
+void JourneyCamSetCinema(float aspect); // the game's own vertical FOV (degrees) while ours is in place; 0 if unknown // once per frame: on while a VR session is running

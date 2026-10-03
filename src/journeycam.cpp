@@ -77,8 +77,23 @@ static float g_fov = 125.0f;
 static float g_camPos[3] = {}, g_camSpeed = 0.0f; // scene camera position, distance moved last frame
 static volatile float g_gameFov = 0.0f; // the game's own vertical FOV for the scene camera (before ours)
 
+static volatile float g_cinemaAspect = 0.0f; // cinema screen: widen the game's view to this aspect (0: off)
+
 static void* __fastcall Hook_UpdateProj(uint8_t* cam)
 {
+    if (!g_enabled && g_cinemaAspect > 1.0f && cam == g_sceneCam && cam[0x150])
+    {
+        // Cinema screen: the square frame gets the game's vertical FOV in its
+        // middle band and the wider horizontal one of a widescreen view across.
+        float* fov = (float*)(cam + 0x154);
+        const float game = *fov;
+        g_gameFov = game;
+        if (game > 1.0f && game < 120.0f)
+            *fov = 2.0f * atanf(tanf(game * 0.5f * 0.0174533f) * g_cinemaAspect) * 57.29578f;
+        void* r = realUpdateProj(cam);
+        *fov = game;
+        return r;
+    }
     if (!g_enabled || cam != g_sceneCam || !cam[0x150]) return realUpdateProj(cam);
     float* fov = (float*)(cam + 0x154);
     const bool held = cam == g_localCam; // our FOV is already in place for the rest of this frame
@@ -232,6 +247,7 @@ bool JourneyCamInstall(float fovDegrees, bool headCamera)
 
 float JourneyCamGameFov() { return g_gameFov; }
 float JourneyCamSpeed() { return g_camSpeed; }
+void JourneyCamSetCinema(float aspect) { g_cinemaAspect = aspect; }
 
 void JourneyCamTick(bool enable)
 {

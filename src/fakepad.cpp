@@ -27,6 +27,7 @@ static WORD g_buttons = 0;
 static BYTE g_lt = 0, g_rt = 0;
 static DWORD g_packet = 0;
 static bool g_fileEnabled = false;
+static volatile float g_leftStick = 0; // the game's last read of the left stick (0..1)
 
 // Second source: VR motion controllers (set every frame by the XR code).
 static volatile float g_xrLx = 0, g_xrLy = 0, g_xrRx = 0, g_xrRy = 0;
@@ -109,6 +110,8 @@ static DWORD WINAPI Hook_XInputGetState(DWORD user, XINPUT_STATE* state)
     float rx = g_rx != 0 ? g_rx : g_xrRx, ry = g_ry != 0 ? g_ry : g_xrRy;
     if (rx != 0) state->Gamepad.sThumbRX = ToAxis(rx);
     if (ry != 0) state->Gamepad.sThumbRY = ToAxis(ry);
+    const float sx = state->Gamepad.sThumbLX / 32767.0f, sy = state->Gamepad.sThumbLY / 32767.0f;
+    g_leftStick = sqrtf(sx * sx + sy * sy);
     return ERROR_SUCCESS;
 }
 
@@ -133,3 +136,5 @@ void InstallFakePad(const wchar_t* dllDir)
     if (st == MH_OK) st = MH_EnableHook(target);
     Log("[fakepad] hooked XInputGetState at %p: %s (pad file %ls)", target, MH_StatusToString(st), g_padPath);
 }
+
+float FakePadLeftStick() { return g_leftStick; }

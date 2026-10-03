@@ -88,15 +88,15 @@ static bool Create(ID3D11DeviceContext* ctx)
 // A textured square panel in the reference space: dist ahead, half-size half,
 // center height above eye level. srv: the texture to show (null: whatever the
 // game has bound at t0). opaque: no blending (the cinema screen).
-static bool DrawPanel(ID3D11DeviceContext* ctx, int eye, float dist, float half, float height,
-                      ID3D11ShaderResourceView* srv, bool opaque)
+static bool DrawPanel(ID3D11DeviceContext* ctx, int eye, float dist, float halfW, float halfH, float height,
+                      ID3D11ShaderResourceView* srv, bool opaque, float v0 = 0.0f, float v1 = 1.0f)
 {
     if (!StereoHasEyePoses() || !Create(ctx)) return false;
 
     // Corners: top-left, top-right, bottom-left, bottom-right (a triangle strip).
-    const float xs[4] = { -half, half, -half, half };
-    const float ys[4] = { height + half, height + half, height - half, height - half };
-    const float us[4] = { 0, 1, 0, 1 }, vs[4] = { 0, 0, 1, 1 };
+    const float xs[4] = { -halfW, halfW, -halfW, halfW };
+    const float ys[4] = { height + halfH, height + halfH, height - halfH, height - halfH };
+    const float us[4] = { 0, 1, 0, 1 }, vs[4] = { v0, v0, v1, v1 };
     Vertex v[4];
     for (int i = 0; i < 4; ++i)
     {
@@ -153,10 +153,13 @@ static bool DrawPanel(ID3D11DeviceContext* ctx, int eye, float dist, float half,
 
 bool UiSignDraw(ID3D11DeviceContext* ctx, int eye)
 {
-    return DrawPanel(ctx, eye, g_dist, g_half, g_height, nullptr, false);
+    return DrawPanel(ctx, eye, g_dist, g_half, g_half, g_height, nullptr, false);
 }
 
-bool UiPanelDraw(ID3D11DeviceContext* ctx, int eye, ID3D11ShaderResourceView* srv, float dist, float size, float height)
+bool UiPanelDraw(ID3D11DeviceContext* ctx, int eye, ID3D11ShaderResourceView* srv, float dist, float size, float height, float aspect)
 {
-    return DrawPanel(ctx, eye, dist, size * 0.5f, height, srv, true);
+    // A band of the square texture, aspect wide by 1 high (centered).
+    if (aspect < 1.0f) aspect = 1.0f;
+    const float band = 0.5f / aspect;
+    return DrawPanel(ctx, eye, dist, size * 0.5f, size * 0.5f / aspect, height, srv, true, 0.5f - band, 0.5f + band);
 }

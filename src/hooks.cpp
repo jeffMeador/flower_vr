@@ -282,10 +282,12 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
     int renderedEye = Stereo().doubleRender ? 2 : StereoCurrentEye();
     ShadowBypass bypass; // our own context calls below must not be mirrored
     g_blockN++;
+    CinemaUpdate();
     CinemaCompose(This, timingCtx);
     { BlockTimer bt(g_xrSum, g_xrWorst); XrSubmitFrame(This, renderedEye); }
     CamOverrideTick(XrSessionActive());
     JourneyCamTick((XrSessionActive() || g_forceGameFov) && !CinemaActive());
+    JourneyCamSetCinema(XrSessionActive() && CinemaActive() ? CinemaAspect() : 0.0f);
     {
         DXGI_SWAP_CHAIN_DESC scd = {};
         This->GetDesc(&scd);
