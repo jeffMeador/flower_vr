@@ -3,6 +3,7 @@
 #include "log.h"
 #include "stereo.h"
 #include "capture.h"
+#include "cinema.h"
 #include <Windows.h>
 #include <MinHook.h>
 #include <cstring>
@@ -76,7 +77,7 @@ static SceneParams_t realSceneParams;
 static uint8_t* volatile g_sceneCam = nullptr;
 static volatile bool g_enabled = false;
 static float g_fov = 125.0f;
-static float g_camPos[3] = {}, g_camSpeed = 0.0f; // scene camera position, distance moved last frame
+static float g_camPos[3] = {}, g_camFwd[3] = {}, g_camSpeed = 0.0f; // scene camera position, distance moved last frame
 static volatile float g_gameFov = 0.0f; // the game's own vertical FOV for the scene camera (before ours)
 
 static volatile float g_cinemaAspect = 0.0f; // cinema screen: widen the game's view to this aspect (0: off)
@@ -134,7 +135,7 @@ static void* __fastcall Hook_UpdateView(uint8_t* view)
 {
     uint8_t* cam = view ? view - 0x10 : nullptr;
     float* w = view ? *(float**)(view + 0xB0) : nullptr;
-    if (cam == g_sceneCam && w) { g_camPos[0] = w[8]; g_camPos[1] = w[9]; g_camPos[2] = w[10]; }
+    if (cam == g_sceneCam && w) { g_camPos[0] = w[8]; g_camPos[1] = w[9]; g_camPos[2] = w[10]; g_camFwd[0] = w[4]; g_camFwd[1] = w[5]; g_camFwd[2] = w[6]; }
     if (!g_enabled || !g_headCamera || cam != g_sceneCam || !w) return realUpdateView(view);
 
     // Unpack to Flower's layout: rows right, up, z, position.
@@ -294,6 +295,19 @@ void JourneyCamTick(bool enable)
         static float last[3] = {};
         const float d[3] = { g_camPos[0] - last[0], g_camPos[1] - last[1], g_camPos[2] - last[2] };
         g_camSpeed = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        if (g_camSpeed > 3.0f)
+        {
+            // A camera cut. The intro's last shots cut to the character from
+            // close behind (2.9 units; every other shot is 30-190 away), and
+            // that shot carries on into gameplay: automatic cinema mode goes
+            // to full VR there rather than seconds later at the first prompt.
+            float pp[3];
+            if (CapturePlayerPos(pp))
+            {
+                const float dx = pp[0] - g_camPos[0], dy = pp[1] - g_camPos[1], dz = pp[2] - g_camPos[2];
+                CinemaNoteCameraCut(sqrtf(dx * dx + dy * dy + dz * dz));
+            }
+        }
         memcpy(last, g_camPos, sizeof(last));
     }
     // Desktop tests: a file vrmod_fov holding "<fov> [<fake head yaw>]" sets them live (read and deleted).

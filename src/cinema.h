@@ -16,6 +16,9 @@ void CinemaToggle();
 // prompt was drawn (you have control). CinemaUpdate once per frame.
 void CinemaNoteUiLayer();
 void CinemaNotePrompt();
+// A camera cut to a camera this far (game units) from the player: close means
+// the shot you play from (the end of the intro).
+void CinemaNoteCameraCut(float distToPlayer);
 void CinemaUpdate();
 // Once per Present, before the eyes go to the headset: replaces both eye
 // images with the screen when cinema mode is on.

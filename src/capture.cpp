@@ -1084,6 +1084,39 @@ static void GuiImageInfo(ID3D11DeviceContext* self, UINT& w, UINT& h, float& alp
     if (sh == g_cbShadow.end() || !sh->second.valid || a->second.second + 4 > sh->second.data.size()) return;
     memcpy(&alpha, sh->second.data.data() + a->second.second, 4);
 }
+// GuiImage's vertex shader (S_GuiImage_vs), scaled by kTitleScale around the
+// screen center. Same inputs and outputs, same constants (Orient, CenterPos, Bias).
+static ID3D11VertexShader* GuiTitleVS(ID3D11DeviceContext* self)
+{
+    static ID3D11VertexShader* vs = nullptr;
+    static bool tried = false;
+    if (vs || tried) return vs;
+    tried = true;
+    static const char kSrc[] =
+        "cbuffer G : register(b0) { float4 c[33]; };\n"
+        "struct I { float3 p : POSITION; float2 uv : TEXCOORD0; };\n"
+        "struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
+        "O main(I i) {\n"
+        "  float s, co; sincos(c[30].x, s, co);\n"
+        "  float2 cp = c[31].xy; float a = c[32].x;\n"
+        "  float2 off = float2(i.p.x * a - cp.x * a, i.p.y - cp.y);\n"
+        "  float2 np = float2(co * off.x - s * off.y, s * off.x + co * off.y);\n"
+        "  O o; o.p = float4((cp.x * a + np.x) / a * 0.85, (cp.y + np.y) * 0.85, 0, 1); o.uv = i.uv; return o;\n"
+        "}\n";
+    ID3DBlob* b = nullptr, * err = nullptr;
+    if (FAILED(D3DCompile(kSrc, sizeof(kSrc) - 1, "guititle_vs", nullptr, nullptr, "main", "vs_5_0", 0, 0, &b, &err)))
+    {
+        Log("[gui] title shader compile failed: %s", err ? (const char*)err->GetBufferPointer() : "?");
+        if (err) err->Release();
+        return nullptr;
+    }
+    ID3D11Device* dev = nullptr;
+    self->GetDevice(&dev);
+    if (dev) { dev->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &vs); dev->Release(); }
+    b->Release();
+    return vs;
+}
+
 static bool IsScreenFill(ID3D11DeviceContext* self)
 {
     UINT w, h; float alpha;
@@ -1178,15 +1211,14 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
         {
             UINT w, h; float alpha;
             GuiImageInfo(self, w, h, alpha);
-            if (w > 16 && alpha > 0.05f) CinemaNotePrompt(); // a visible prompt (not a fade, not hidden)
-            {   // TEMP DIAG: visible GuiImages
-                static UINT lw = 0, lh = 0; static int n = 0;
-                if (alpha > 0.05f && (w != lw || h != lh) && n < 200)
-                {
-                    n++; lw = w; lh = h;
-                    D3D11_VIEWPORT v = {}; UINT nv = 1; self->RSGetViewports(&nv, &v);
-                    Log("[gui] visible GuiImage tex %ux%u alpha %.2f count %u vp %.0fx%.0f", w, h, alpha, count, v.Width, v.Height);
-                }
+            // Visible images (not fades, not hidden): the tutorial prompts come
+            // from a tall strip of button pictures (512x2304) and mean you have
+            // control; anything else (the "JOURNEY" logo, 1024x256, in play and
+            // on the idle screen) is a title card, shown on the cinema screen.
+            if (w > 16 && alpha > 0.05f)
+            {
+                if (h >= 2 * w) CinemaNotePrompt();
+                else CinemaNoteUiLayer();
             }
         }
         else
@@ -1245,17 +1277,75 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
         return;
     }
     D3D11_VIEWPORT giVp[2], giOrig;
-    if (!ShadowBypassed() && StereoPatchKey() != 0 && GuiImageViewports(self, giVp, giOrig))
+    bool giCinema = false, giTitle = false;
+    if (!ShadowBypassed() && CinemaActive() && CinemaAspect() > 1.0f && !wcscmp(Game().name, L"Journey"))
+    {
+        // Cinema screen: it shows the middle band of the square frame, and 2D
+        // images laid out for the square screen (the "JOURNEY" title sits low)
+        // fell outside it. They're drawn shrunk into that band instead.
+        auto o = g_offsets.find(g_contextState[self].currentVS);
+        if (o != g_offsets.end() && o->second.guiImage && !IsScreenFill(self))
+        {
+            UINT n = 1;
+            self->RSGetViewports(&n, &giOrig);
+            if (n && giOrig.Width > 1)
+            {
+                const float k = 1.0f / CinemaAspect();
+                giVp[0] = giOrig;
+                giVp[0].Width = giOrig.Width * k;
+                giVp[0].Height = giOrig.Height * k;
+                giVp[0].TopLeftX = giOrig.TopLeftX + (giOrig.Width - giVp[0].Width) * 0.5f;
+                giVp[0].TopLeftY = giOrig.TopLeftY + (giOrig.Height - giVp[0].Height) * 0.5f;
+                giVp[1] = giVp[0];
+                giCinema = true;
+                UINT tw, th; float ta;
+                GuiImageInfo(self, tw, th, ta);
+                giTitle = th < 2 * tw; // not a prompt (those come from a tall strip of button pictures)
+            }
+        }
+    }
+    if (giCinema || (!ShadowBypassed() && StereoPatchKey() != 0 && GuiImageViewports(self, giVp, giOrig)))
     {
         // Journey's GuiImage (tutorial prompts): a 2D image at a game-screen
         // position, so drawn on the same pixels of both eyes' images, which
         // look in different directions - it showed double. Each eye maps the
         // game screen into its own view and adds the disparity of promptDistance.
+        // Drawn smaller than on a monitor. GuiImage reads the image's shape
+        // (alpha) with PointClampSampler (s8, nearest texel) and its color with
+        // a bilinear one (s9): the outlines came out pixelated. Both get a
+        // trilinear anisotropic sampler for these draws.
+        static ID3D11SamplerState* smooth = nullptr;
+        if (!smooth)
+        {
+            ID3D11Device* dev = nullptr;
+            self->GetDevice(&dev);
+            D3D11_SAMPLER_DESC sd = {};
+            sd.Filter = D3D11_FILTER_ANISOTROPIC;
+            sd.MaxAnisotropy = 8;
+            sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+            sd.MaxLOD = D3D11_FLOAT32_MAX;
+            if (dev) { dev->CreateSamplerState(&sd, &smooth); dev->Release(); }
+        }
+        // Titles on the cinema screen: Journey lays the "JOURNEY" logo out for
+        // a widescreen monitor; on its square frame the Y hung off the right
+        // edge and was cut. They're drawn with a copy of the GuiImage vertex
+        // shader that scales them down slightly around the screen center.
+        ID3D11VertexShader* titleVS = giTitle ? GuiTitleVS(self) : nullptr;
+        auto drawSmooth = [&](ID3D11DeviceContext* c) {
+            ID3D11SamplerState* old[2] = {};
+            ID3D11SamplerState* both[2] = { smooth, smooth };
+            if (smooth) { c->PSGetSamplers(8, 2, old); c->PSSetSamplers(8, 2, both); }
+            ID3D11VertexShader* oldVS = nullptr;
+            if (titleVS) { c->VSGetShader(&oldVS, nullptr, nullptr); c->VSSetShader(titleVS, nullptr, 0); }
+            draw(c);
+            if (titleVS) { c->VSSetShader(oldVS, nullptr, 0); if (oldVS) oldVS->Release(); }
+            if (smooth) { c->PSSetSamplers(8, 2, old); for (auto* o : old) if (o) o->Release(); }
+        };
         StereoSetRenderEye(0);
         {
             ShadowBypass g;
             self->RSSetViewports(1, &giVp[0]);
-            draw(self);
+            drawSmooth(self);
             self->RSSetViewports(1, &giOrig);
         }
         if (Stereo().doubleRender && MirrorActive() && MirrorRightOutputsValid())
@@ -1265,7 +1355,7 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
             {
                 ShadowBypass g;
                 r->RSSetViewports(1, &giVp[1]);
-                draw(r);
+                drawSmooth(r);
                 r->RSSetViewports(1, &giOrig);
             }
             MirrorNoteDraw();

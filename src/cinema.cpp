@@ -39,6 +39,15 @@ void CinemaNotePrompt()
     if (g_latched && (!g_lastUi || GetTickCount() - g_lastUi > 1000)) { g_latched = false; Log("[cinema] prompt seen: you have control"); }
 }
 
+void CinemaNoteCameraCut(float distToPlayer)
+{
+    if (g_latched && distToPlayer < 4.0f && (!g_lastUi || GetTickCount() - g_lastUi > 1000))
+    {
+        g_latched = false;
+        Log("[cinema] camera cut to the player (%.1f units away): full VR", distToPlayer);
+    }
+}
+
 void CinemaInit(const wchar_t* ini)
 {
     wcscpy_s(g_ini, ini);
