@@ -62,12 +62,14 @@ static SceneParams_t realSceneParams;
 static uint8_t* volatile g_sceneCam = nullptr;
 static volatile bool g_enabled = false;
 static float g_fov = 125.0f;
+static volatile float g_gameFov = 0.0f; // the game's own vertical FOV for the scene camera (before ours)
 
 static void* __fastcall Hook_UpdateProj(uint8_t* cam)
 {
     if (!g_enabled || cam != g_sceneCam || !cam[0x150]) return realUpdateProj(cam);
     float* fov = (float*)(cam + 0x154);
     float game = *fov;
+    g_gameFov = game;
     *fov = g_fov;
     void* r = realUpdateProj(cam);
     *fov = game;
@@ -177,6 +179,8 @@ bool JourneyCamInstall(float fovDegrees, bool headCamera)
     }
     return ok;
 }
+
+float JourneyCamGameFov() { return g_gameFov; }
 
 void JourneyCamTick(bool enable)
 {

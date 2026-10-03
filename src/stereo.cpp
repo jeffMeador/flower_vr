@@ -390,6 +390,17 @@ static void BuildK()
         eyeCanon[0] = e;
     }
     g_viewShiftX[g_renderEye] = t.m[0][3];
+    {   // TEMP DIAG: per-eye offset in VR
+        static DWORD last[2] = {};
+        if (GetTickCount() - last[g_renderEye] > 5000)
+        {
+            last[g_renderEye] = GetTickCount();
+            Log("[stereo] DIAG eye %d posesSet=%d head=%d pos(%.3f %.3f %.3f) T.x=%.4f T.y=%.4f T.z=%.4f eyeCanon(%.4f %.4f %.4f)",
+                g_renderEye, g_activePoses[g_renderEye].set ? 1 : 0, g_appliedHead.set ? 1 : 0,
+                g_activePoses[g_renderEye].pos[0], g_activePoses[g_renderEye].pos[1], g_activePoses[g_renderEye].pos[2],
+                t.m[0][3], t.m[1][3], t.m[2][3], eyeCanon[0], eyeCanon[1], eyeCanon[2]);
+        }
+    }
     for (int i = 0; i < 3; ++i)
         g_eyeWorld[g_renderEye][i] = eyeCanon[0] * g_right[i] + eyeCanon[1] * g_up[i] + eyeCanon[2] * g_fwd[i];
 
@@ -422,6 +433,19 @@ static void BuildK()
             g_activePoses[g_renderEye].set ? atan2f(R[2], R[8]) * 57.2958f : 0.0f, g_activePoses[g_renderEye].set ? asinf(-R[5]) * 57.2958f : 0.0f,
             g_activePoses[g_renderEye].pos[0], g_activePoses[g_renderEye].pos[1], g_activePoses[g_renderEye].pos[2], t.m[0][0], t.m[0][1], t.m[0][2], t.m[0][3]);
     }
+}
+
+float StereoOverlayNdcShift(int eye, float meters)
+{
+    // Crossed disparity of a point `meters` ahead, as a sideways NDC shift for
+    // this eye (+ left eye, - right eye); 0 without headset data.
+    const EyePose& a = g_activePoses[0];
+    const EyePose& b = g_activePoses[1];
+    const DisplayFov& d = g_display[eye ? 1 : 0];
+    if (!a.set || !b.set || !d.set || meters <= 0.01f) return 0.0f;
+    const float dx = a.pos[0] - b.pos[0], dy = a.pos[1] - b.pos[1], dz = a.pos[2] - b.pos[2];
+    const float k = (0.5f * sqrtf(dx * dx + dy * dy + dz * dz) / meters) * d.cropX * 2.0f / (d.tanR - d.tanL);
+    return eye ? -k : k;
 }
 
 void StereoPatchClip(float* m)

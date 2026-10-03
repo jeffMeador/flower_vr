@@ -7,6 +7,7 @@
 #include "vhook.h"
 #include "game.h"
 #include "uisign.h"
+#include "journeycam.h"
 #include <cmath>
 #include <d3d11shader.h>
 #include <d3dcompiler.h>
@@ -41,6 +42,7 @@ struct ShaderOffsets
     UINT cbSize = 0;
     int  id = 0;
     unsigned long long dxbc = 0; // DXBC checksum: identifies a game shader across runs
+    bool guiImage = false;       // Journey's GuiImage: a 2D image placed by CenterPos/Orient (no camera)
 };
 
 // CPU-side copy of what the game last wrote into a (small) constant buffer.
@@ -205,6 +207,7 @@ static void ReflectAndCacheOffsets(ID3D11VertexShader* shader, const void* bytec
             D3D11_SHADER_VARIABLE_DESC varDesc = {};
             varRefl->GetDesc(&varDesc);
             std::string n = Lower(varDesc.Name);
+            if (n == "centerpos" && (varDesc.uFlags & D3D_SVF_USED)) offsets.guiImage = true;
 
             // Exact names only: substring matching confused "oldModelViewProj"
             // with "modelViewProj" (MotionBlur shaders have both).
@@ -990,6 +993,59 @@ static bool UiViewports(ID3D11DeviceContext* self, D3D11_VIEWPORT eyeVp[2], bool
     return true;
 }
 
+// Per-eye viewports for a GuiImage draw onto the swap chain: the game screen
+// mapped into each eye (StereoMapNdc), shifted to appear [xr] promptDistance
+// ahead (default 4 m: about where the character stands). False: not such a draw.
+static bool GuiImageViewports(ID3D11DeviceContext* self, D3D11_VIEWPORT vp[2], D3D11_VIEWPORT& orig)
+{
+    auto off = g_offsets.find(g_contextState[self].currentVS);
+    if (off == g_offsets.end() || !off->second.guiImage || !g_backbuffer || !StereoHasEyePoses()) return false;
+    ID3D11RenderTargetView* rtv = nullptr;
+    self->OMGetRenderTargets(1, &rtv, nullptr);
+    if (!rtv) return false;
+    ID3D11Resource* res = nullptr;
+    rtv->GetResource(&res);
+    bool swap = res == g_backbuffer;
+    if (res) res->Release();
+    rtv->Release();
+    if (!swap) return false;
+    UINT n = 1;
+    self->RSGetViewports(&n, &orig);
+    if (n == 0 || orig.Width < 1) return false;
+    static float meters = -1.0f;
+    if (meters < 0.0f)
+    {
+        extern wchar_t g_dllDir[MAX_PATH];
+        wchar_t ini[MAX_PATH], buf[32];
+        swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
+        GetPrivateProfileStringW(L"xr", L"promptDistance", L"4.0", buf, 32, ini);
+        meters = (float)_wtof(buf);
+        Log("[ui] tutorial prompts (GuiImage) at %.2f m", meters);
+    }
+    // The image is laid out for the game's own field of view; ours is wider
+    // (125 deg), so map the part of our screen the game's view would cover.
+    float xs, ys, s = 1.0f;
+    const float gameFov = JourneyCamGameFov();
+    if (gameFov > 5.0f && gameFov < 170.0f && StereoProjection(xs, ys))
+    {
+        s = tanf(gameFov * 0.5f * 0.0174533f) * ys;
+        if (s > 1.0f) s = 1.0f;
+    }
+    for (int e = 0; e < 2; ++e)
+    {
+        float x0, y0, x1, y1;
+        if (!StereoMapNdc(e, -s, -s, &x0, &y0) || !StereoMapNdc(e, s, s, &x1, &y1)) return false;
+        const float shift = StereoOverlayNdcShift(e, meters);
+        x0 += shift; x1 += shift;
+        vp[e] = orig;
+        vp[e].TopLeftX = orig.TopLeftX + (fminf(x0, x1) + 1.0f) * 0.5f * orig.Width;
+        vp[e].TopLeftY = orig.TopLeftY + (1.0f - fmaxf(y0, y1)) * 0.5f * orig.Height;
+        vp[e].Width = fabsf(x1 - x0) * 0.5f * orig.Width;
+        vp[e].Height = fabsf(y1 - y0) * 0.5f * orig.Height;
+    }
+    return true;
+}
+
 template <class F>
 static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
 {
@@ -1030,6 +1086,35 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
                     if (uiVis[1]) draw(r);
                     r->RSSetViewports(1, &uiOrig);
                 }
+            }
+            MirrorNoteDraw();
+            StereoSetRenderEye(0);
+        }
+        return;
+    }
+    D3D11_VIEWPORT giVp[2], giOrig;
+    if (!ShadowBypassed() && StereoPatchKey() != 0 && GuiImageViewports(self, giVp, giOrig))
+    {
+        // Journey's GuiImage (tutorial prompts): a 2D image at a game-screen
+        // position, so drawn on the same pixels of both eyes' images, which
+        // look in different directions - it showed double. Each eye maps the
+        // game screen into its own view and adds the disparity of promptDistance.
+        StereoSetRenderEye(0);
+        {
+            ShadowBypass g;
+            self->RSSetViewports(1, &giVp[0]);
+            draw(self);
+            self->RSSetViewports(1, &giOrig);
+        }
+        if (Stereo().doubleRender && MirrorActive() && MirrorRightOutputsValid())
+        {
+            ID3D11DeviceContext* r = MirrorContext();
+            StereoSetRenderEye(1);
+            {
+                ShadowBypass g;
+                r->RSSetViewports(1, &giVp[1]);
+                draw(r);
+                r->RSSetViewports(1, &giOrig);
             }
             MirrorNoteDraw();
             StereoSetRenderEye(0);
