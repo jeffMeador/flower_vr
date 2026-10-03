@@ -19,3 +19,7 @@ ID3D11Resource* CaptureSceneDepth();
 // Batched double render: write the game's latest data back into a constant
 // buffer after the right eye's command list overwrote it.
 void CaptureRestoreOriginal(ID3D11DeviceContext* ctx, ID3D11Resource* buf);
+
+// Journey: the player's world position this frame (the character shaders'
+// localDudePos); false if not drawn recently.
+bool CapturePlayerPos(float out[3]);

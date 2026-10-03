@@ -88,6 +88,9 @@ struct PixelOverride
 static std::unordered_map<ID3D11PixelShader*, std::vector<PixelOverride>> g_psOverrides;
 static std::unordered_map<ID3D11PixelShader*, std::string> g_psNames; // constant names, for vrmod_uitrace
 static std::unordered_map<ID3D11PixelShader*, std::pair<UINT, UINT>> g_psAlpha; // slot, offset of "Alpha" (GuiImage)
+static std::unordered_map<ID3D11PixelShader*, std::pair<UINT, UINT>> g_psDude;  // slot, offset of "localDudePos" (Journey's player)
+static float g_dudePos[3] = {};
+static uint64_t g_dudeFrame = 0;
 
 // [psoverride] in vrmod.ini: <constant name>=<float>, lower-cased names. Pins any
 // pixel-shader constant while in stereo (for tuning another game's effects).
@@ -339,6 +342,7 @@ static HRESULT STDMETHODCALLTYPE Hook_CreatePixelShader(ID3D11Device* self, cons
             if (fx != fixed.end())
                 ov.push_back({ PixelOverride::Fixed, bd.BindPoint, vd.StartOffset, fx->second });
             if (n == "alpha") g_psAlpha[*out] = { bd.BindPoint, vd.StartOffset };
+            if (n == "localdudepos") g_psDude[*out] = { bd.BindPoint, vd.StartOffset };
             if (n == "blurzranges")
             {
                 // Depth of field: blur = clamp(max((Z-x)*y, (Z-z)*w)): .y is the near
@@ -1134,10 +1138,29 @@ static bool GuiImageViewports(ID3D11DeviceContext* self, D3D11_VIEWPORT vp[2], D
     return true;
 }
 
+// Journey's player position, from the character shaders' localDudePos.
+static void NoteDudePos(ID3D11DeviceContext* self)
+{
+    ContextState& st = g_contextState[self];
+    auto d = g_psDude.find(st.currentPS);
+    if (d == g_psDude.end() || d->second.first >= 4) return;
+    auto sh = g_cbShadow.find(st.psCB[d->second.first]);
+    if (sh == g_cbShadow.end() || !sh->second.valid || d->second.second + 12 > sh->second.data.size()) return;
+    memcpy(g_dudePos, sh->second.data.data() + d->second.second, 12);
+    g_dudeFrame = g_captureFrame.load();
+}
+bool CapturePlayerPos(float out[3])
+{
+    if (!g_dudeFrame || g_captureFrame.load() - g_dudeFrame > 2) return false;
+    memcpy(out, g_dudePos, sizeof(g_dudePos));
+    return true;
+}
+
 template <class F>
 static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
 {
     if (self != g_immediateCtx) { draw(self); return; } // e.g. the mirror's own deferred context
+    if (!g_psDude.empty()) NoteDudePos(self);
     if (g_uiTrace) TraceDraw(self, count);
     if (count == 6 && HiddenMenuLogo(self)) return;
     if (!ShadowBypassed() && g_backbuffer && !wcscmp(Game().name, L"Journey"))

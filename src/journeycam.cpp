@@ -2,6 +2,7 @@
 #include "game.h"
 #include "log.h"
 #include "stereo.h"
+#include "capture.h"
 #include <Windows.h>
 #include <MinHook.h>
 #include <cstring>
@@ -63,6 +64,7 @@ static float g_frameOrig[12], g_frameTurned[12]; // the game's values and ours
 static bool g_headCamera = false;
 static float g_fakeYaw = 0.0f;  // [debug] fakeHeadYaw (degrees): a fixed head turn for desktop tests
 static bool g_fakeYawOn = false;
+static float g_steadyTau = 3.0f;  // [xr] cameraSteady: seconds to smooth the camera's distance to the player (0: off)
 static bool g_localTurn = true;   // [debug] localTurn=0: leave the camera's local transform and FOV alone (A/B test)
 static bool g_noPassHook = false; // [debug] noPassHook=1: leave pass setup alone (A/B test)
 
@@ -137,6 +139,32 @@ static void* __fastcall Hook_UpdateView(uint8_t* view)
 
     // Unpack to Flower's layout: rows right, up, z, position.
     float m[16] = { w[3], w[7], w[11], 0,  w[0], w[1], w[2], 0,  w[4], w[5], w[6], 0,  w[8], w[9], w[10], 1 };
+
+    // Steady distance: Journey's chase camera falls behind while you walk and
+    // swings in when you stop, then drifts back out - on a monitor it's
+    // subtle, in VR it's you being pulled back and forth. The distance to the
+    // player is smoothed over g_steadyTau seconds (direction untouched).
+    {
+        static float smooth = 0.0f;
+        static DWORD last = 0;
+        const DWORD now = GetTickCount();
+        const float dt = last ? (now - last) * 0.001f : 0.0f;
+        last = now;
+        float c[3];
+        if (g_steadyTau > 0.05f && CapturePlayerPos(c))
+        {
+            const float v[3] = { m[12] - c[0], m[13] - c[1], m[14] - c[2] };
+            const float d = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+            if (d > 0.01f)
+            {
+                if (smooth <= 0.0f || dt > 0.5f || fabsf(d - smooth) > 0.5f * smooth) smooth = d; // cut or jump
+                else smooth += (d - smooth) * (1.0f - expf(-dt / g_steadyTau));
+                const float k = smooth / d;
+                for (int i = 0; i < 3; ++i) m[12 + i] = c[i] + v[i] * k;
+            }
+        }
+        else smooth = 0.0f;
+    }
     float R[9], t[3];
     if (!StereoTakeHeadForCamera(m, R, t)) return realUpdateView(view);
     float e[3][3], pos[3];
@@ -215,6 +243,8 @@ bool JourneyCamInstall(float fovDegrees, bool headCamera)
         g_fakeYaw = (float)_wtof(buf);
         g_noPassHook = GetPrivateProfileIntW(L"debug", L"noPassHook", 0, ini) != 0;
         g_localTurn = GetPrivateProfileIntW(L"debug", L"localTurn", 1, ini) != 0;
+        GetPrivateProfileStringW(L"xr", L"cameraSteady", L"3.0", buf, 32, ini);
+        g_steadyTau = (float)_wtof(buf);
         g_fakeYawOn = g_fakeYaw != 0.0f;
         if (g_fakeYawOn) Log("[journeycam] DEBUG fake head yaw %.0f deg", g_fakeYaw);
     }
