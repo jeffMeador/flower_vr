@@ -1,6 +1,7 @@
 #include "stereo.h"
 #include "log.h"
 #include "keys.h"
+#include "game.h"
 #include <cstdlib>
 
 static StereoConfig g_cfg;
@@ -50,6 +51,10 @@ void StereoLoadConfig(const wchar_t* dllDir)
     GetPrivateProfileStringW(L"stereo", L"render", L"alternate", mode, 32, g_iniPath);
     g_cfg.doubleRender = _wcsicmp(mode, L"double") == 0;
     g_cfg.motionBlur = ReadIniFloat(L"motionBlur", 0.0f) != 0.0f;
+    // Journey: every head movement counts as camera motion for its motion blur,
+    // which smeared the whole view in VR (A/B with a turning test head). Off
+    // unless [stereo] journeyMotionBlur=1.
+    if (!wcscmp(Game().name, L"Journey")) g_cfg.motionBlur = ReadIniFloat(L"journeyMotionBlur", 0.0f) != 0.0f;
     g_cfg.depthOfField = ReadIniFloat(L"depthOfField", 0.0f) != 0.0f;
     g_cfg.sparkleSize = ReadIniFloat(L"sparkleSize", 0.5f);
     g_cfg.dofNear = ReadIniFloat(L"dofNear", 1.0f);
@@ -442,6 +447,24 @@ bool StereoProjectRefPoint(int eye, const float p[3], float* ox, float* oy)
     float tx = q[0] / -q[2], ty = q[1] / -q[2];
     *ox = d.cropX * (2.0f * tx - (d.tanR + d.tanL)) / (d.tanR - d.tanL);
     *oy = d.cropY * (2.0f * ty - (d.tanU + d.tanD)) / (d.tanU - d.tanD);
+    return true;
+}
+
+bool StereoRefPointToClip(int eye, const float p[3], float clip[4])
+{
+    eye = eye ? 1 : 0;
+    const EyePose& e = g_activePoses[eye];
+    const DisplayFov& d = g_display[eye];
+    if (!e.set || !d.set) return false;
+    float v[3] = { p[0] - e.pos[0], p[1] - e.pos[1], p[2] - e.pos[2] }, q[3];
+    for (int i = 0; i < 3; ++i) q[i] = e.rot[0 * 3 + i] * v[0] + e.rot[1 * 3 + i] * v[1] + e.rot[2 * 3 + i] * v[2];
+    const float zc = -q[2]; // distance ahead of the eye (may be <= 0: the GPU clips it)
+    const float sx = d.cropX * 2.0f / (d.tanR - d.tanL), ox = -d.cropX * (d.tanR + d.tanL) / (d.tanR - d.tanL);
+    const float sy = d.cropY * 2.0f / (d.tanU - d.tanD), oy = -d.cropY * (d.tanU + d.tanD) / (d.tanU - d.tanD);
+    clip[0] = sx * q[0] + ox * zc;
+    clip[1] = sy * q[1] + oy * zc;
+    clip[2] = 0.01f * zc; // just past the near plane: in front of everything, clipped behind the eye
+    clip[3] = zc;
     return true;
 }
 

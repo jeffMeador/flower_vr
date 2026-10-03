@@ -181,7 +181,7 @@ bool JourneyCamInstall(float fovDegrees, bool headCamera)
 void JourneyCamTick(bool enable)
 {
     g_frameWorld = nullptr; // Present: this frame's turned transform is used up
-    if (g_fakeYaw != 0.0f && enable)
+    if (g_fakeYaw != 0.0f && enable && !StereoHasEyePoses())
     {
         const float a = g_fakeYaw * 3.14159265f / 180.0f, c = cosf(a), s = sinf(a);
         const float rot[9] = { c, 0, s,  0, 1, 0,  -s, 0, c }, pos[3] = { 0, 0, 0 };

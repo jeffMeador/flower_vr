@@ -6,6 +6,7 @@
 #include "mirror.h"
 #include "vhook.h"
 #include "game.h"
+#include "uisign.h"
 #include <cmath>
 #include <d3d11shader.h>
 #include <d3dcompiler.h>
@@ -907,6 +908,7 @@ static void LoadMenuSign()
     GetPrivateProfileStringW(L"xr", L"menuSize", L"2.5", buf, 32, ini); g_menuSize = (float)_wtof(buf);
     GetPrivateProfileStringW(L"xr", L"menuHeight", L"-0.15", buf, 32, ini); g_menuHeight = (float)_wtof(buf);
     Log("[ui] menu sign: %.2f m ahead, %.2f m wide, %.2f m height", g_menuDist, g_menuSize, g_menuHeight);
+    UiSignSetup(g_menuDist, g_menuSize, g_menuHeight);
 }
 
 // One eye's sign rectangle in pixels of the viewport v. False: no headset data
@@ -1002,11 +1004,17 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
         StereoSetRenderEye(0);
         PrepareDraw(self);
         PreparePixel(self);
+        // With headset data: a real panel in the room (uisign.cpp), drawn
+        // instead of the game's full-screen pass. Otherwise the viewport.
+        const bool panel = StereoHasEyePoses();
         {
             ShadowBypass g;
-            self->RSSetViewports(1, &uiVp[0]);
-            if (uiVis[0]) draw(self);
-            self->RSSetViewports(1, &uiOrig);
+            if (!panel || !UiSignDraw(self, 0))
+            {
+                self->RSSetViewports(1, &uiVp[0]);
+                if (uiVis[0]) draw(self);
+                self->RSSetViewports(1, &uiOrig);
+            }
         }
         if (Stereo().doubleRender && MirrorActive() && MirrorRightOutputsValid())
         {
@@ -1016,9 +1024,12 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
             PreparePixelRight();
             {
                 ShadowBypass g;
-                r->RSSetViewports(1, &uiVp[1]);
-                if (uiVis[1]) draw(r);
-                r->RSSetViewports(1, &uiOrig);
+                if (!panel || !UiSignDraw(r, 1))
+                {
+                    r->RSSetViewports(1, &uiVp[1]);
+                    if (uiVis[1]) draw(r);
+                    r->RSSetViewports(1, &uiOrig);
+                }
             }
             MirrorNoteDraw();
             StereoSetRenderEye(0);

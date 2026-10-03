@@ -1191,6 +1191,34 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
             float ws = Stereo().worldScale;
             float camToMeters = 1.0f / (ws > 1e-4f ? ws : 1e-4f);
             XrQuaternionf refInv = QConj(g_ref.orientation);
+            // Debug: a fixed head turn on top of the tracked pose ([debug]
+            // fakeHeadYaw/Pitch/Roll, degrees), for testing with a headset
+            // that doesn't move (SteamVR's null driver).
+            static int fakeRead = 0;
+            static XrQuaternionf fake = { 0, 0, 0, 1 };
+            static bool useFake = false;
+            static float fakeA[3] = {}, fakeSpin = 0; // half-angles (rad); spin: yaw deg/s
+            if (!fakeRead)
+            {
+                fakeRead = 1;
+                wchar_t b[32];
+                float a[3];
+                const wchar_t* keys[3] = { L"fakeHeadYaw", L"fakeHeadPitch", L"fakeHeadRoll" };
+                for (int k = 0; k < 3; ++k) { GetPrivateProfileStringW(L"debug", keys[k], L"0", b, 32, g_iniPath); a[k] = (float)_wtof(b) * 0.0087266f; fakeA[k] = a[k]; }
+                GetPrivateProfileStringW(L"debug", L"fakeHeadSpin", L"0", b, 32, g_iniPath); fakeSpin = (float)_wtof(b);
+                XrQuaternionf qy = { 0, sinf(a[0]), 0, cosf(a[0]) }, qx = { sinf(a[1]), 0, 0, cosf(a[1]) }, qz = { 0, 0, sinf(a[2]), cosf(a[2]) };
+                fake = QMul(qy, QMul(qx, qz));
+                useFake = a[0] != 0 || a[1] != 0 || a[2] != 0 || fakeSpin != 0;
+                if (useFake) Log("[xr] DEBUG fake head turn: yaw %.0f pitch %.0f roll %.0f deg", a[0] / 0.0087266f, a[1] / 0.0087266f, a[2] / 0.0087266f);
+            }
+            if (useFake && fakeSpin != 0)
+            {
+                // Continuous turn (yaw), e.g. to see motion blur from head movement.
+                const float y = fakeA[0] + fakeSpin * 0.0087266f * (GetTickCount() % 360000) / 1000.0f;
+                XrQuaternionf qy = { 0, sinf(y), 0, cosf(y) }, qx = { sinf(fakeA[1]), 0, 0, cosf(fakeA[1]) }, qz = { 0, 0, sinf(fakeA[2]), cosf(fakeA[2]) };
+                fake = QMul(qy, QMul(qx, qz));
+            }
+            if (useFake) refInv = QMul(fake, refInv);
             for (int e = 0; e < 2; ++e)
             {
                 StereoSetDisplayFov(e, tanf(views[e].fov.angleLeft), tanf(views[e].fov.angleRight),

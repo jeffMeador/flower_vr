@@ -4,6 +4,7 @@
 #include <Windows.h>
 #include <string>
 #include <cstdio>
+#include <cstring>
 
 // Same values as vrmod.ini.example, except the square size, which matches the
 // auto-created vrmod_Flower.cfg below.
@@ -64,7 +65,16 @@ void EnsureDefaultSettings(const wchar_t* dllDir)
     std::wstring ini = dir + L"\\vrmod.ini";
     if (!Exists(ini))
     {
-        bool ok = WriteAll(ini, kDefaultIni);
+        std::string text = kDefaultIni;
+        if (!wcscmp(Game().name, L"Journey"))
+        {
+            // Flower's viewpoint offset (behind/above its chase camera) put the eyes
+            // where Journey doesn't draw the ground: gaps and popping around you.
+            const char* from[3] = { "cameraBack=1.50", "cameraUp=0.55", "cameraSide=-0.25" };
+            const char* to[3] = { "cameraBack=0", "cameraUp=0", "cameraSide=0" };
+            for (int i = 0; i < 3; ++i) { size_t at = text.find(from[i]); if (at != std::string::npos) text.replace(at, strlen(from[i]), to[i]); }
+        }
+        bool ok = WriteAll(ini, text);
         Log("[defaults] no vrmod.ini: %s one with the recommended settings", ok ? "wrote" : "could NOT write");
     }
 

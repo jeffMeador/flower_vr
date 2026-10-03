@@ -98,6 +98,9 @@ bool StereoMapNdc(int eye, float x, float y, float* ox, float* oy);
 // point is behind the eye.
 bool StereoProjectRefPoint(int eye, const float p[3], float* ox, float* oy);
 bool StereoHasEyePoses(); // both eyes' tracked poses and display FOVs are known
+// The same point as clip-space coordinates for drawing (perspective-correct,
+// depth just past the near plane); points behind the eye come out with w <= 0.
+bool StereoRefPointToClip(int eye, const float p[3], float clip[4]);
 void StereoPatchView(float* m);
 
 // World-space offset of the current eye from the game camera (for
