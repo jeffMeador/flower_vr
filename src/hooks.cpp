@@ -302,22 +302,47 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
 
     // F12 dumps the next two frames: consecutive frames hold both eyes under
     // alternate-eye stereo. (Periodic dumps at 7680x2160 cost ~50MB each.)
-    static int dumpRemaining = 0;
+    static int dumpRemaining = 0, dumpEvery = 1;
     if (KeyEdge(VK_F12))
-        dumpRemaining = 2;
+        dumpRemaining = 2, dumpEvery = 1;
     // Remote trigger (hotkeys need the game in focus): a file named vrmod_dump
     // next to the DLL dumps the next frame's eyes and is removed.
     if ((frame % 30) == 0)
     {
         wchar_t trig[MAX_PATH];
         swprintf_s(trig, L"%s\\vrmod_dump", g_dllDir);
-        if (GetFileAttributesW(trig) != INVALID_FILE_ATTRIBUTES && DeleteFileW(trig))
+        if (GetFileAttributesW(trig) != INVALID_FILE_ATTRIBUTES)
         {
-            dumpRemaining = 1;
-            Log("[dump] requested by file");
+            // Optional contents "<count> <every>": a series of dumps, one every <every> frames.
+            int count = 1, every = 1;
+            if (FILE* f = _wfopen(trig, L"r")) { if (fscanf(f, "%d %d", &count, &every) < 1) count = 1; fclose(f); }
+            if (DeleteFileW(trig))
+            {
+                dumpRemaining = count < 1 ? 1 : count;
+                dumpEvery = every < 1 ? 1 : every;
+                Log("[dump] requested by file (%d, every %d frames)", dumpRemaining, dumpEvery);
+            }
         }
     }
-    if (frame < 2 || dumpRemaining > 0)
+    // [debug] dumpSpeed=<units/frame>: dump every frame while the Journey camera
+    // moves faster (fast camera flights), up to dumpSpeedCount frames.
+    static int speedBudget = -1;
+    static float speedMin = 0.0f;
+    if (speedBudget < 0)
+    {
+        wchar_t ini[MAX_PATH], buf[32];
+        swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
+        GetPrivateProfileStringW(L"debug", L"dumpSpeed", L"0", buf, 32, ini);
+        speedMin = (float)_wtof(buf);
+        speedBudget = speedMin > 0.0f ? GetPrivateProfileIntW(L"debug", L"dumpSpeedCount", 300, ini) : 0;
+    }
+    if ((frame % 60) == 0 && speedMin > 0.0f) Log("[dump] frame %u camera speed %.3f", frame, JourneyCamSpeed());
+    if (speedBudget > 0 && JourneyCamSpeed() > speedMin && dumpRemaining == 0)
+    {
+        speedBudget--;
+        dumpRemaining = 1, dumpEvery = 1;
+    }
+    if (frame < 2 || (dumpRemaining > 0 && frame % dumpEvery == 0))
     {
         DumpBackbufferBMP(This, frame);
         if (Stereo().doubleRender) DumpBackbufferBMP(This, frame, true);

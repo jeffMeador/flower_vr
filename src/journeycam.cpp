@@ -6,6 +6,7 @@
 #include <MinHook.h>
 #include <cstring>
 #include <cmath>
+#include <cstdio>
 
 // Journey (Steam) camera object, found with the camfind watchpoints:
 //   +0x10  view matrix (3 float4s)        +0x40  projection (4 float4s)
@@ -48,10 +49,21 @@ static const uint8_t kPassSetupBytes[] = { 0x40, 0x53, 0x48, 0x81, 0xEC, 0xA0, 0
                                            0xB0, 0x00, 0x00, 0x00, 0x48, 0x8B, 0xD9, 0x48, 0x89, 0x91, 0xB0, 0x00 };
 using PassSetup_t = void*(__fastcall*)(void* pass, uint8_t* view);
 static PassSetup_t realPassSetup;
+// The camera's local transform (camera + 0x170: rows right, up, z, position;
+// world = local here, the camera has no parent) and its FOV (+0x154) are what
+// many render-side systems build their culling frustums from (terrain, grass,
+// particles: 0x10EDD0, 0x115690, 0xE3710, ...), after UpdateView. They get the
+// head-turned camera and our FOV from UpdateView until Present; the game
+// rewrites both from its own camera state at the start of the next frame, and
+// its one earlier read of them (0xDB582) comes after Present, so it never sees ours.
+static uint8_t* g_localCam = nullptr;
+static float g_localOrig[16], g_localOurs[16], g_fovOrig = 0.0f;
 static float* g_frameWorld = nullptr;            // the transform turned this frame (null: none)
 static float g_frameOrig[12], g_frameTurned[12]; // the game's values and ours
 static bool g_headCamera = false;
 static float g_fakeYaw = 0.0f;  // [debug] fakeHeadYaw (degrees): a fixed head turn for desktop tests
+static bool g_fakeYawOn = false;
+static bool g_localTurn = true;   // [debug] localTurn=0: leave the camera's local transform and FOV alone (A/B test)
 static bool g_noPassHook = false; // [debug] noPassHook=1: leave pass setup alone (A/B test)
 
 using UpdateProj_t = void*(__fastcall*)(uint8_t* cam);
@@ -62,17 +74,19 @@ static SceneParams_t realSceneParams;
 static uint8_t* volatile g_sceneCam = nullptr;
 static volatile bool g_enabled = false;
 static float g_fov = 125.0f;
+static float g_camPos[3] = {}, g_camSpeed = 0.0f; // scene camera position, distance moved last frame
 static volatile float g_gameFov = 0.0f; // the game's own vertical FOV for the scene camera (before ours)
 
 static void* __fastcall Hook_UpdateProj(uint8_t* cam)
 {
     if (!g_enabled || cam != g_sceneCam || !cam[0x150]) return realUpdateProj(cam);
     float* fov = (float*)(cam + 0x154);
-    float game = *fov;
+    const bool held = cam == g_localCam; // our FOV is already in place for the rest of this frame
+    float game = held ? g_gameFov : *fov;
     g_gameFov = game;
     *fov = g_fov;
     void* r = realUpdateProj(cam);
-    *fov = game;
+    if (!held) *fov = game;
     return r;
 }
 
@@ -83,15 +97,27 @@ static void* __fastcall Hook_SceneParams(void* out, uint8_t* view, void* a3, voi
     if (cam != g_sceneCam)
     {
         g_sceneCam = cam;
-        Log("[journeycam] scene camera %p (game fov %.1f deg)", cam, cam ? *(float*)(cam + 0x154) : 0.0f);
+        Log("[journeycam] scene camera %p (game fov %.1f deg), world transform %p", cam, cam ? *(float*)(cam + 0x154) : 0.0f,
+            cam ? *(void**)(cam + 0xC0) : nullptr);
     }
-    return realSceneParams(out, view, a3, a4);
+    // It also copies the camera's world transform (*(view + 0xB0)) into the
+    // scene setup, which picks the terrain to draw: give it this frame's turned
+    // transform too, or terrain beyond the game's own view went missing and
+    // flickered when looking around (big gaps in fast flights).
+    float* w = view ? *(float**)(view + 0xB0) : nullptr;
+    if (g_noPassHook || !g_enabled || !w || w != g_frameWorld || memcmp(w, g_frameOrig, sizeof(g_frameOrig)) != 0)
+        return realSceneParams(out, view, a3, a4);
+    memcpy(w, g_frameTurned, sizeof(g_frameTurned));
+    void* r = realSceneParams(out, view, a3, a4);
+    memcpy(w, g_frameOrig, sizeof(g_frameOrig));
+    return r;
 }
 
 static void* __fastcall Hook_UpdateView(uint8_t* view)
 {
     uint8_t* cam = view ? view - 0x10 : nullptr;
     float* w = view ? *(float**)(view + 0xB0) : nullptr;
+    if (cam == g_sceneCam && w) { g_camPos[0] = w[8]; g_camPos[1] = w[9]; g_camPos[2] = w[10]; }
     if (!g_enabled || !g_headCamera || cam != g_sceneCam || !w) return realUpdateView(view);
 
     // Unpack to Flower's layout: rows right, up, z, position.
@@ -115,6 +141,28 @@ static void* __fastcall Hook_UpdateView(uint8_t* view)
     memcpy(g_frameOrig, saved, sizeof(saved));
     memcpy(g_frameTurned, packed, sizeof(packed));
     g_frameWorld = w;
+
+    float* L = (float*)(cam + 0x170);
+    const float worldAsLocal[16] = { saved[3], saved[7], saved[11], L[3],  saved[0], saved[1], saved[2], L[7],
+                                     saved[4], saved[5], saved[6], L[11],  saved[8], saved[9], saved[10], L[15] };
+    bool sameAsWorld = true;
+    for (int i = 0; i < 16; ++i) if (fabsf(L[i] - worldAsLocal[i]) > 1e-3f) sameAsWorld = false;
+    if (g_localTurn && !g_localCam && sameAsWorld)
+    {
+        memcpy(g_localOrig, L, sizeof(g_localOrig));
+        g_fovOrig = *(float*)(cam + 0x154);
+        const float ours[16] = { n[0][0], n[0][1], n[0][2], L[3],  n[1][0], n[1][1], n[1][2], L[7],
+                                 n[2][0], n[2][1], n[2][2], L[11],  np[0], np[1], np[2], L[15] };
+        memcpy(g_localOurs, ours, sizeof(ours));
+        memcpy(L, ours, sizeof(ours));
+        *(float*)(cam + 0x154) = g_fov;
+        g_localCam = cam;
+    }
+    else if (g_localTurn && !sameAsWorld)
+    {
+        static bool logged = false;
+        if (!logged) { logged = true; Log("[journeycam] camera has a parent transform; its local copy is left alone"); }
+    }
 
     static DWORD lastLog = 0;
     if (GetTickCount() - lastLog > 10000) { lastLog = GetTickCount(); Log("[journeycam] head camera active"); }
@@ -151,7 +199,9 @@ bool JourneyCamInstall(float fovDegrees, bool headCamera)
         GetPrivateProfileStringW(L"debug", L"fakeHeadYaw", L"0", buf, 32, ini);
         g_fakeYaw = (float)_wtof(buf);
         g_noPassHook = GetPrivateProfileIntW(L"debug", L"noPassHook", 0, ini) != 0;
-        if (g_fakeYaw != 0.0f) Log("[journeycam] DEBUG fake head yaw %.0f deg", g_fakeYaw);
+        g_localTurn = GetPrivateProfileIntW(L"debug", L"localTurn", 1, ini) != 0;
+        g_fakeYawOn = g_fakeYaw != 0.0f;
+        if (g_fakeYawOn) Log("[journeycam] DEBUG fake head yaw %.0f deg", g_fakeYaw);
     }
     if (!Matches(kUpdateProjRva, kUpdateProjBytes, sizeof(kUpdateProjBytes)) ||
         !Matches(kSceneParamsRva, kSceneParamsBytes, sizeof(kSceneParamsBytes)))
@@ -181,11 +231,43 @@ bool JourneyCamInstall(float fovDegrees, bool headCamera)
 }
 
 float JourneyCamGameFov() { return g_gameFov; }
+float JourneyCamSpeed() { return g_camSpeed; }
 
 void JourneyCamTick(bool enable)
 {
     g_frameWorld = nullptr; // Present: this frame's turned transform is used up
-    if (g_fakeYaw != 0.0f && enable && !StereoHasEyePoses())
+    if (g_localCam)
+    {
+        float* L = (float*)(g_localCam + 0x170);
+        if (memcmp(L, g_localOurs, sizeof(g_localOurs)) == 0) memcpy(L, g_localOrig, sizeof(g_localOrig));
+        float* fov = (float*)(g_localCam + 0x154);
+        if (*fov == g_fov) *fov = g_fovOrig;
+        g_localCam = nullptr;
+    }
+    {
+        static float last[3] = {};
+        const float d[3] = { g_camPos[0] - last[0], g_camPos[1] - last[1], g_camPos[2] - last[2] };
+        g_camSpeed = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        memcpy(last, g_camPos, sizeof(last));
+    }
+    // Desktop tests: a file vrmod_fov holding "<fov> [<fake head yaw>]" sets them live (read and deleted).
+    static int tick = 0;
+    if (++tick % 30 == 0)
+    {
+        extern wchar_t g_dllDir[MAX_PATH];
+        wchar_t path[MAX_PATH];
+        swprintf_s(path, L"%s\\vrmod_fov", g_dllDir);
+        if (FILE* f = _wfopen(path, L"r"))
+        {
+            float v = 0, yaw = 0;
+            const int n = fscanf(f, "%f %f", &v, &yaw);
+            if (n >= 1 && v > 10.0f && v < 170.0f) { g_fov = v; Log("[journeycam] DEBUG fov %.1f", v); }
+            if (n == 2) { g_fakeYaw = yaw; g_fakeYawOn = true; Log("[journeycam] DEBUG fake head yaw %.1f", yaw); }
+            fclose(f);
+            DeleteFileW(path);
+        }
+    }
+    if (g_fakeYawOn && enable && !StereoHasEyePoses())
     {
         const float a = g_fakeYaw * 3.14159265f / 180.0f, c = cosf(a), s = sinf(a);
         const float rot[9] = { c, 0, s,  0, 1, 0,  -s, 0, c }, pos[3] = { 0, 0, 0 };
