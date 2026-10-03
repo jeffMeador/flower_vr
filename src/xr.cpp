@@ -5,6 +5,8 @@
 #include "stereo.h"
 #include "shadow.h"
 #include <Windows.h>
+#include <TlHelp32.h>
+#include <shellapi.h>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -46,6 +48,15 @@ static XrStage g_stage = XrStage::Off;
 static ID3D11Device* g_device = nullptr;
 static wchar_t g_loaderPath[MAX_PATH] = {};
 static DWORD g_nextRetry = 0;
+// Starting SteamVR: through Steam (steam://run/250820), not by letting the
+// OpenXR loader start its server directly. Launched from the Steam Frame's
+// library, a flat game is first streamed to the Frame as a desktop stream;
+// a server started behind Steam's back never gets the headset (it restarted
+// every few seconds, "headset not connected") until you connected Steam Link
+// VR by hand - which makes Steam launch SteamVR itself. [xr] launchSteamVR=0:
+// the old way.
+static bool g_launchViaSteam = true;
+static DWORD g_steamVrAsked = 0;   // when we asked Steam to start SteamVR (0: not yet)
 
 static XrInstance g_instance = XR_NULL_HANDLE;
 static XrSystemId g_system = XR_NULL_SYSTEM_ID;
@@ -105,6 +116,49 @@ void XrInit(ID3D11Device* device, const wchar_t* dllDir)
     GetPrivateProfileStringW(L"xr", L"cameraUp", L"0.25", buf, 32, ini); g_camUp = (float)_wtof(buf);
     GetPrivateProfileStringW(L"xr", L"cameraSide", L"0", buf, 32, ini); g_camSide = (float)_wtof(buf);
     Log("[xr] camera offset: back %.2f, up %.2f, side %.2f game units", g_camBack, g_camUp, g_camSide);
+    g_launchViaSteam = GetPrivateProfileIntW(L"xr", L"launchSteamVR", 1, ini) != 0;
+}
+
+static bool ProcessRunning(const wchar_t* exe)
+{
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return false;
+    PROCESSENTRY32W pe = { sizeof(pe) };
+    bool found = false;
+    for (BOOL ok = Process32FirstW(snap, &pe); ok && !found; ok = Process32NextW(snap, &pe))
+        found = !_wcsicmp(pe.szExeFile, exe);
+    CloseHandle(snap);
+    return found;
+}
+
+// True once it's time to talk to SteamVR: it's running, or we're not starting it via Steam.
+static bool SteamVrReady()
+{
+    if (!g_launchViaSteam) return true;
+    const bool running = ProcessRunning(L"vrserver.exe") || ProcessRunning(L"vrcompositor.exe");
+    if (running)
+    {
+        // Give a SteamVR we just asked for a moment to come up before connecting.
+        static DWORD seen = 0;
+        if (!g_steamVrAsked) return true;
+        if (!seen) { seen = GetTickCount(); Log("[xr] SteamVR is starting"); }
+        return GetTickCount() - seen > 3000;
+    }
+    if (!g_steamVrAsked)
+    {
+        g_steamVrAsked = GetTickCount();
+        Log("[xr] SteamVR isn't running: asking Steam to start it (steam://run/250820)");
+        ShellExecuteW(nullptr, L"open", L"steam://run/250820", nullptr, nullptr, SW_SHOWNORMAL);
+        return false;
+    }
+    // Still not running after a long wait (no Steam?): fall back to the loader starting it.
+    if (GetTickCount() - g_steamVrAsked > 120000)
+    {
+        Log("[xr] SteamVR didn't start through Steam; starting it directly");
+        g_launchViaSteam = false;
+        return true;
+    }
+    return false;
 }
 
 static bool LoadLoader()
@@ -1321,6 +1375,7 @@ void XrSubmitFrame(IDXGISwapChain* swapChain, int renderedEye)
         if (!xrGetInstanceProcAddr_ && !LoadLoader()) { g_stage = XrStage::Failed; return; }
         if (GetTickCount() < g_nextRetry) return;
         g_nextRetry = GetTickCount() + 5000;
+        if (!SteamVrReady()) { g_nextRetry = GetTickCount() + 1000; return; }
         if (!CreateInstance()) return;
         g_nextRetry = 0;
         g_stage = XrStage::NeedSystem;
