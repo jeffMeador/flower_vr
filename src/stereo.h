@@ -97,6 +97,7 @@ bool StereoMapNdc(int eye, float x, float y, float* ox, float* oy);
 // using that eye's tracked pose and display FOV. False without them or if the
 // point is behind the eye.
 bool StereoProjectRefPoint(int eye, const float p[3], float* ox, float* oy);
+void StereoSetMono(bool mono); // cinema mode: no per-eye changes at all
 bool StereoHasEyePoses(); // both eyes' tracked poses and display FOVs are known
 // The same point as clip-space coordinates for drawing (perspective-correct,
 // depth just past the near plane); points behind the eye come out with w <= 0.

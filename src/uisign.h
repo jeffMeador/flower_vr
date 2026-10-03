@@ -9,3 +9,5 @@
 // the caller draws the game's way.
 bool UiSignSetup(float distance, float size, float height);
 bool UiSignDraw(ID3D11DeviceContext* ctx, int eye);
+// The same kind of panel showing srv, opaque (the cinema screen), size meters wide.
+bool UiPanelDraw(ID3D11DeviceContext* ctx, int eye, ID3D11ShaderResourceView* srv, float dist, float size, float height);

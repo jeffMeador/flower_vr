@@ -13,6 +13,7 @@
 #include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include "fakepad.h"
+#include "cinema.h"
 #include "capture.h"
 
 #define XR_USE_PLATFORM_WIN32
@@ -611,6 +612,7 @@ static void PollControllers(XrTime time)
         for (int h = 0; h < 2; ++h) { float t = GetFloat(g_actTrigger, h); if (t > trig) trig = t; }
         bool jump = GetBool(g_actFlyButton, 0) || GetBool(g_actFlyButton, 1) || trig > 0.5f;
         bool sing = handB[0] || handB[1] || handGrip[0] > 0.5f || handGrip[1] > 0.5f;
+        if (recenter) CinemaToggle(); // thumbstick click: full VR <-> the game's view on a screen
         WORD buttons = 0;
         if (jump) buttons |= XINPUT_GAMEPAD_A;
         if (sing) buttons |= XINPUT_GAMEPAD_B;

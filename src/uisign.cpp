@@ -85,18 +85,22 @@ static bool Create(ID3D11DeviceContext* ctx)
     return true;
 }
 
-bool UiSignDraw(ID3D11DeviceContext* ctx, int eye)
+// A textured square panel in the reference space: dist ahead, half-size half,
+// center height above eye level. srv: the texture to show (null: whatever the
+// game has bound at t0). opaque: no blending (the cinema screen).
+static bool DrawPanel(ID3D11DeviceContext* ctx, int eye, float dist, float half, float height,
+                      ID3D11ShaderResourceView* srv, bool opaque)
 {
     if (!StereoHasEyePoses() || !Create(ctx)) return false;
 
     // Corners: top-left, top-right, bottom-left, bottom-right (a triangle strip).
-    const float xs[4] = { -g_half, g_half, -g_half, g_half };
-    const float ys[4] = { g_height + g_half, g_height + g_half, g_height - g_half, g_height - g_half };
+    const float xs[4] = { -half, half, -half, half };
+    const float ys[4] = { height + half, height + half, height - half, height - half };
     const float us[4] = { 0, 1, 0, 1 }, vs[4] = { 0, 0, 1, 1 };
     Vertex v[4];
     for (int i = 0; i < 4; ++i)
     {
-        const float p[3] = { xs[i], ys[i], -g_dist };
+        const float p[3] = { xs[i], ys[i], -dist };
         if (!StereoRefPointToClip(eye, p, v[i].pos)) return false;
         v[i].uv[0] = us[i];
         v[i].uv[1] = vs[i];
@@ -112,6 +116,8 @@ bool UiSignDraw(ID3D11DeviceContext* ctx, int eye)
     ID3D11PixelShader* oldPS = nullptr; ctx->PSGetShader(&oldPS, nullptr, nullptr);
     ID3D11SamplerState* oldSampler = nullptr; ctx->PSGetSamplers(0, 1, &oldSampler);
     ID3D11RasterizerState* oldRaster = nullptr; ctx->RSGetState(&oldRaster);
+    ID3D11ShaderResourceView* oldSrv = nullptr; ctx->PSGetShaderResources(0, 1, &oldSrv);
+    ID3D11BlendState* oldBlend = nullptr; float oldFactor[4]; UINT oldMask = 0; ctx->OMGetBlendState(&oldBlend, oldFactor, &oldMask);
 
     const UINT stride = sizeof(Vertex), offset = 0;
     ctx->IASetInputLayout(g_layout);
@@ -121,6 +127,8 @@ bool UiSignDraw(ID3D11DeviceContext* ctx, int eye)
     ctx->PSSetShader(g_ps, nullptr, 0);
     ctx->PSSetSamplers(0, 1, &g_sampler);
     ctx->RSSetState(g_raster);
+    if (srv) ctx->PSSetShaderResources(0, 1, &srv);
+    if (opaque) ctx->OMSetBlendState(nullptr, nullptr, 0xFFFFFFFF);
     ctx->Draw(4, 0);
 
     ctx->IASetInputLayout(oldLayout);
@@ -130,11 +138,25 @@ bool UiSignDraw(ID3D11DeviceContext* ctx, int eye)
     ctx->PSSetShader(oldPS, nullptr, 0);
     ctx->PSSetSamplers(0, 1, &oldSampler);
     ctx->RSSetState(oldRaster);
+    if (srv) ctx->PSSetShaderResources(0, 1, &oldSrv);
+    if (opaque) ctx->OMSetBlendState(oldBlend, oldFactor, oldMask);
     if (oldLayout) oldLayout->Release();
     if (oldVB) oldVB->Release();
     if (oldVS) oldVS->Release();
     if (oldPS) oldPS->Release();
     if (oldSampler) oldSampler->Release();
     if (oldRaster) oldRaster->Release();
+    if (oldSrv) oldSrv->Release();
+    if (oldBlend) oldBlend->Release();
     return true;
+}
+
+bool UiSignDraw(ID3D11DeviceContext* ctx, int eye)
+{
+    return DrawPanel(ctx, eye, g_dist, g_half, g_height, nullptr, false);
+}
+
+bool UiPanelDraw(ID3D11DeviceContext* ctx, int eye, ID3D11ShaderResourceView* srv, float dist, float size, float height)
+{
+    return DrawPanel(ctx, eye, dist, size * 0.5f, height, srv, true);
 }

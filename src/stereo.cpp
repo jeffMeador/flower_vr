@@ -313,8 +313,12 @@ static const DisplayFov* CurrentDisplay()
     return d.set ? &d : nullptr;
 }
 
+static bool g_mono = false; // cinema mode: draw the game's own flat view in both eyes
+void StereoSetMono(bool mono) { g_mono = mono; }
+
 uint64_t StereoPatchKey()
 {
+    if (g_mono) return 0;
     // Only while a 3D camera is live: menus/videos after a level must not be remapped with a stale camera.
     if (!g_projKnown || g_frame - g_projFrame >= 10) return 0;
     if (!(StereoCurrentEye() != 0 || g_cfg.doubleRender || CurrentDisplay() || g_activePoses[g_renderEye].set)) return 0;

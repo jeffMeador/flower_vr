@@ -9,6 +9,7 @@
 #include "stereo.h"
 #include "camfind.h"
 #include "journeycam.h"
+#include "cinema.h"
 #include "camoverride.h"
 #include "shadow.h"
 #include "mirror.h"
@@ -281,9 +282,10 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
     int renderedEye = Stereo().doubleRender ? 2 : StereoCurrentEye();
     ShadowBypass bypass; // our own context calls below must not be mirrored
     g_blockN++;
+    CinemaCompose(This, timingCtx);
     { BlockTimer bt(g_xrSum, g_xrWorst); XrSubmitFrame(This, renderedEye); }
     CamOverrideTick(XrSessionActive());
-    JourneyCamTick(XrSessionActive() || g_forceGameFov);
+    JourneyCamTick((XrSessionActive() || g_forceGameFov) && !CinemaActive());
     {
         DXGI_SWAP_CHAIN_DESC scd = {};
         This->GetDesc(&scd);
@@ -372,6 +374,7 @@ void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* device, ID
         swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
         GetPrivateProfileStringW(L"xr", L"gameFov", L"125", buf, 32, ini);
         CamOverrideInstall((float)_wtof(buf));
+        CinemaInit(ini);
         JourneyCamInstall((float)_wtof(buf), GetPrivateProfileIntW(L"xr", L"headCamera", 0, ini) != 0);
         g_forceGameFov = GetPrivateProfileIntW(L"debug", L"forceGameFov", 0, ini) != 0;
         CamOverrideSetHeadCamera(GetPrivateProfileIntW(L"xr", L"headCamera", 0, ini) != 0);
