@@ -390,17 +390,6 @@ static void BuildK()
         eyeCanon[0] = e;
     }
     g_viewShiftX[g_renderEye] = t.m[0][3];
-    {   // TEMP DIAG: per-eye offset in VR
-        static DWORD last[2] = {};
-        if (GetTickCount() - last[g_renderEye] > 5000)
-        {
-            last[g_renderEye] = GetTickCount();
-            Log("[stereo] DIAG eye %d posesSet=%d head=%d pos(%.3f %.3f %.3f) T.x=%.4f T.y=%.4f T.z=%.4f eyeCanon(%.4f %.4f %.4f)",
-                g_renderEye, g_activePoses[g_renderEye].set ? 1 : 0, g_appliedHead.set ? 1 : 0,
-                g_activePoses[g_renderEye].pos[0], g_activePoses[g_renderEye].pos[1], g_activePoses[g_renderEye].pos[2],
-                t.m[0][3], t.m[1][3], t.m[2][3], eyeCanon[0], eyeCanon[1], eyeCanon[2]);
-        }
-    }
     for (int i = 0; i < 3; ++i)
         g_eyeWorld[g_renderEye][i] = eyeCanon[0] * g_right[i] + eyeCanon[1] * g_up[i] + eyeCanon[2] * g_fwd[i];
 
