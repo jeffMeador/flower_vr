@@ -77,7 +77,9 @@ struct ContextState
 // (blurZRanges slopes -> 0) and glare trails (glare history off).
 struct PixelOverride
 {
-    enum Kind { DepthOfField, Trails, Fixed } kind; // Fixed: [psoverride] name=value from vrmod.ini
+    // Fixed: [psoverride] name=value from vrmod.ini. EyeRay: per-eye depth-to-world
+    // rays (value: 0 prjPlaneOrigin, 1 prjPlaneU, 2 prjPlaneV, 3 eyePositionWS).
+    enum Kind { DepthOfField, Trails, Fixed, EyeRay } kind;
     UINT slot;
     UINT offset;
     float value;
@@ -314,6 +316,7 @@ static HRESULT STDMETHODCALLTYPE Hook_CreatePixelShader(ID3D11Device* self, cons
     refl->GetDesc(&sd);
     std::vector<PixelOverride> ov;
     bool glareInt = false, accumInt = false;
+    int rayOff[4] = { -1, -1, -1, -1 }; UINT raySlot = 0;
     UINT glareSlot = 0, glareOff = 0, accumOff = 0;
     for (UINT cb = 0; cb < sd.ConstantBuffers; ++cb)
     {
@@ -342,6 +345,10 @@ static HRESULT STDMETHODCALLTYPE Hook_CreatePixelShader(ID3D11Device* self, cons
                 ov.push_back({ PixelOverride::DepthOfField, bd.BindPoint, vd.StartOffset + 12, 1.0f });
                 Log("[capture] pixel shader with depth of field: blurZRanges in slot %u @%u", bd.BindPoint, vd.StartOffset);
             }
+            else if (n == "prjplaneorigin") { rayOff[0] = (int)vd.StartOffset; raySlot = bd.BindPoint; }
+            else if (n == "prjplaneu") rayOff[1] = (int)vd.StartOffset;
+            else if (n == "prjplanev") rayOff[2] = (int)vd.StartOffset;
+            else if (n == "eyepositionws") rayOff[3] = (int)vd.StartOffset;
             else if (n == "glareint") { glareInt = true; glareSlot = bd.BindPoint; glareOff = vd.StartOffset; }
             else if (n == "accumint") { accumInt = true; accumOff = vd.StartOffset; }
         }
@@ -355,6 +362,15 @@ static HRESULT STDMETHODCALLTYPE Hook_CreatePixelShader(ID3D11Device* self, cons
         ov.push_back({ PixelOverride::Trails, glareSlot, glareOff, 1.0f });
         ov.push_back({ PixelOverride::Trails, glareSlot, accumOff, 0.0f });
         Log("[capture] pixel shader with glare accumulation (slot %u @%u/@%u)", glareSlot, glareOff, accumOff);
+    }
+    if (rayOff[0] >= 0 && rayOff[1] >= 0 && rayOff[2] >= 0 && rayOff[3] >= 0)
+    {
+        // Journey's screen-space effects that rebuild world positions from depth
+        // (the character's soft shadow, "Occlusion"): their rays are the game
+        // camera's; each eye needs its own, or the shadow lands beside the
+        // character and is cut off by the box it is drawn in.
+        for (int i = 0; i < 4; ++i) ov.push_back({ PixelOverride::EyeRay, raySlot, (UINT)rayOff[i], (float)i });
+        Log("[capture] pixel shader with depth-to-world rays (slot %u)", raySlot);
     }
     if (!ov.empty()) g_psOverrides[*out] = ov;
     refl->Release();
@@ -670,6 +686,7 @@ static void FinishPrepareDraw(ID3D11DeviceContext* self, ContextState& state, co
 static bool PixelOverrideValue(const PixelOverride& o, bool dofOff, bool dofScaled, bool trailsOff, std::vector<uint8_t>& data)
 {
     float* f = reinterpret_cast<float*>(data.data() + o.offset);
+    if (o.kind == PixelOverride::EyeRay) return false; // see ApplyEyeRays
     if (o.kind == PixelOverride::Fixed) { *f = o.value; return true; }
     if (o.kind == PixelOverride::Trails)
     {
@@ -680,6 +697,33 @@ static bool PixelOverrideValue(const PixelOverride& o, bool dofOff, bool dofScal
     if (dofOff) { *f = 0.0f; return true; }
     if (dofScaled) { *f *= o.value == 0.0f ? Stereo().dofNear : Stereo().dofFar; return true; }
     return false;
+}
+
+// Per-eye depth-to-world rays (see PixelOverride::EyeRay), from the game's values in orig.
+static bool ApplyEyeRays(int eye, const std::vector<PixelOverride>& ovs, UINT slot, const std::vector<uint8_t>& orig, std::vector<uint8_t>& data)
+{
+    int off[4] = { -1, -1, -1, -1 };
+    for (const PixelOverride& o : ovs)
+        if (o.kind == PixelOverride::EyeRay && o.slot == slot && o.offset + 12 <= orig.size()) off[(int)o.value] = (int)o.offset;
+    if (off[0] < 0 || off[1] < 0 || off[2] < 0 || off[3] < 0) return false;
+    const float* in[4];
+    for (int i = 0; i < 4; ++i) in[i] = reinterpret_cast<const float*>(orig.data() + off[i]);
+    float out[4][3];
+    if (!StereoEyeRays(eye, in[0], in[1], in[2], in[3], out[0], out[1], out[2], out[3])) return false;
+    for (int i = 0; i < 4; ++i) memcpy(data.data() + off[i], out[i], 12);
+    return true;
+}
+
+// The bound vertex shader's patched version of a buffer the pixel shader also
+// uses (same $Globals buffer), so the pixel overrides don't undo the camera patch.
+static void StartFromVertexPatch(const ContextState& st, ID3D11Resource* buf, const std::vector<uint8_t>& orig, std::vector<uint8_t>& out)
+{
+    out = orig;
+    if (buf != st.currentSlot0CB) return;
+    auto off = g_offsets.find(st.currentVS);
+    if (off == g_offsets.end() || off->second.patches.empty() || StereoPatchKey() == 0) return;
+    std::vector<uint8_t> tmp;
+    if (BuildPatched(off->second, orig, tmp)) out.swap(tmp);
 }
 
 // Pixel-shader constant overrides while in VR (depth of field, glare trails):
@@ -696,6 +740,9 @@ static void PreparePixel(ID3D11DeviceContext* self)
     // Cache tag: this shader's override list (unique address).
     const ShaderOffsets* tag = reinterpret_cast<const ShaderOffsets*>(&it->second);
     uint64_t wantKey = 1 + (dofOff ? 1 : 0) + (trailsOff ? 2 : 0) + (dofScaled ? 4 : 0);
+    bool eyeRays = false;
+    for (const PixelOverride& o : it->second) eyeRays |= o.kind == PixelOverride::EyeRay;
+    if (eyeRays) wantKey += (StereoPatchKey() << 4) + ((uint64_t)StereoRenderEye() << 3);
 
     for (UINT slot = 0; slot < 4; ++slot)
     {
@@ -710,7 +757,7 @@ static void PreparePixel(ID3D11DeviceContext* self)
         if (ours && s.patchedKey == wantKey) continue; // already as wanted
 
         static std::vector<uint8_t> patched;
-        patched = s.data;
+        StartFromVertexPatch(st, buf, s.data, patched);
         bool any = false;
         for (const PixelOverride& o : it->second)
         {
@@ -718,6 +765,7 @@ static void PreparePixel(ID3D11DeviceContext* self)
             if (!PixelOverrideValue(o, dofOff, dofScaled, trailsOff, patched)) continue;
             any = true;
         }
+        if (eyeRays && vr && ApplyEyeRays(StereoRenderEye(), it->second, slot, s.data, patched)) any = true;
         if (!any && !ours) continue; // GPU already holds the game's values
         WriteBuffer(self, buf, s, patched.data());
         s.patchedGen = any ? s.gen : ~0ull;
@@ -755,8 +803,11 @@ static void PreparePixelRight()
         ID3D11Resource* buf = st.psCB[slot];
         auto sh = g_cbShadow.find(buf);
         if (sh == g_cbShadow.end() || !sh->second.valid) continue;
+        bool usesSlot = false;
+        for (const PixelOverride& o : it->second) usesSlot |= o.slot == slot;
+        if (!usesSlot) continue;
         static std::vector<uint8_t> patched;
-        patched = sh->second.data;
+        StartFromVertexPatch(st, buf, sh->second.data, patched);
         bool any = false;
         for (const PixelOverride& o : it->second)
         {
@@ -764,6 +815,7 @@ static void PreparePixelRight()
             if (!PixelOverrideValue(o, dofOff, dofScaled, trailsOff, patched)) continue;
             any = true;
         }
+        if (vr && ApplyEyeRays(1, it->second, slot, sh->second.data, patched)) any = true;
         if (any) MirrorWriteBuffer(buf, patched.data(), (UINT)patched.size(), sh->second.usage);
     }
 }

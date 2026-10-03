@@ -27,6 +27,9 @@ static uint64_t g_kKey[2] = {};
 static Mat4 g_K[2];
 static float g_viewShiftX[2] = {}; // canonical x translation of T (for modelView)
 static float g_eyeWorld[2][3] = {};
+static float g_tRot[2][9] = {};     // T's rotation: game canonical -> eye canonical (row-major)
+static float g_eyeCanonPos[2][3] = {}; // eye position in the rendered camera's canonical axes
+static float g_pnXY[2][4] = {};     // eye projection: sx, ox, sy, oy (ndc = s * q / qz + o)
 
 StereoConfig& Stereo() { return g_cfg; }
 
@@ -390,6 +393,7 @@ static void BuildK()
         eyeCanon[0] = e;
     }
     g_viewShiftX[g_renderEye] = t.m[0][3];
+    for (int i = 0; i < 3; ++i) { for (int j = 0; j < 3; ++j) g_tRot[g_renderEye][i * 3 + j] = t.m[i][j]; g_eyeCanonPos[g_renderEye][i] = eyeCanon[i]; }
     for (int i = 0; i < 3; ++i)
         g_eyeWorld[g_renderEye][i] = eyeCanon[0] * g_right[i] + eyeCanon[1] * g_up[i] + eyeCanon[2] * g_fwd[i];
 
@@ -412,6 +416,8 @@ static void BuildK()
     pn.m[2][3] = g_B;
     pn.m[3][2] = 1.0f;
 
+    g_pnXY[g_renderEye][0] = pn.m[0][0]; g_pnXY[g_renderEye][1] = pn.m[0][2];
+    g_pnXY[g_renderEye][2] = pn.m[1][1]; g_pnXY[g_renderEye][3] = pn.m[1][2];
     g_K[g_renderEye] = Mat4Mul(Mat4Mul(pn, t), pinv);
     g_kKey[g_renderEye] = g_key;
     if ((g_frame % 450) == 0)
@@ -520,5 +526,53 @@ bool StereoWorldEyeOffset(float out[3])
     if (!g_cfg.shiftEyePosition || StereoPatchKey() == 0) return false;
     if (g_kKey[g_renderEye] != g_key) BuildK();
     memcpy(out, g_eyeWorld[g_renderEye], sizeof(g_eyeWorld[g_renderEye]));
+    return true;
+}
+
+int StereoRenderEye() { return g_renderEye; }
+
+bool StereoEyeRays(int eye, const float O[3], const float U[3], const float V[3], const float E[3],
+                   float O2[3], float U2[3], float V2[3], float E2[3])
+{
+    if (StereoPatchKey() == 0) return false;
+    eye = eye ? 1 : 0;
+    if (g_kKey[eye] != g_key)
+    {
+        int saved = g_renderEye;
+        g_renderEye = eye;
+        BuildK();
+        g_renderEye = saved;
+    }
+    // The game's ray for screen NDC (x, y): O + (1-ux) U + (1-uy) V with
+    // u = (ndc + 1) / 2, i.e. A + x Bx + y By, the world vector per unit of
+    // view depth: M (x / xs, y / ys, 1) with M = the camera's canonical axes.
+    float M[3][3]; // columns: right, up, forward (world)
+    for (int k = 0; k < 3; ++k)
+    {
+        M[k][0] = -0.5f * U[k] * g_xs;
+        M[k][1] = -0.5f * V[k] * g_ys;
+        M[k][2] = O[k] + 0.5f * U[k] + 0.5f * V[k];
+    }
+    // The eye's ray for its NDC (x', y'): eye canonical q = ((x'-ox)/sx, (y'-oy)/sy, 1),
+    // in the game's canonical axes c = Rt^T q, in world M c.
+    const float* R = g_tRot[eye];
+    const float sx = g_pnXY[eye][0], ox = g_pnXY[eye][1], sy = g_pnXY[eye][2], oy = g_pnXY[eye][3];
+    if (fabsf(sx) < 1e-6f || fabsf(sy) < 1e-6f) return false;
+    const float qa[3] = { -ox / sx, -oy / sy, 1.0f }, qx[3] = { 1.0f / sx, 0, 0 }, qy[3] = { 0, 1.0f / sy, 0 };
+    auto toWorld = [&](const float q[3], float out[3]) {
+        float c[3];
+        for (int j = 0; j < 3; ++j) c[j] = R[0 * 3 + j] * q[0] + R[1 * 3 + j] * q[1] + R[2 * 3 + j] * q[2];
+        for (int k = 0; k < 3; ++k) out[k] = M[k][0] * c[0] + M[k][1] * c[1] + M[k][2] * c[2];
+    };
+    float A2[3], Bx2[3], By2[3];
+    toWorld(qa, A2); toWorld(qx, Bx2); toWorld(qy, By2);
+    for (int k = 0; k < 3; ++k)
+    {
+        U2[k] = -2.0f * Bx2[k];
+        V2[k] = -2.0f * By2[k];
+        O2[k] = A2[k] + Bx2[k] + By2[k];
+        const float* e = g_eyeCanonPos[eye];
+        E2[k] = E[k] + M[k][0] * e[0] + M[k][1] * e[1] + M[k][2] * e[2];
+    }
     return true;
 }

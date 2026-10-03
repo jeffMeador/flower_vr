@@ -106,6 +106,13 @@ bool StereoHasEyePoses(); // both eyes' tracked poses and display FOVs are known
 // depth just past the near plane); points behind the eye come out with w <= 0.
 bool StereoRefPointToClip(int eye, const float p[3], float clip[4]);
 void StereoPatchView(float* m);
+// Eye currently being patched for (double render: 0 left, 1 right).
+int StereoRenderEye();
+// Depth-to-world rays for an eye. Journey's screen-space effects rebuild a
+// pixel's world position as eye + depth * (O + (1-u) U + (1-v) V) from the
+// game camera's values; this gives the eye's own O, U, V and position.
+bool StereoEyeRays(int eye, const float O[3], const float U[3], const float V[3], const float E[3],
+                   float O2[3], float U2[3], float V2[3], float E2[3]);
 
 // World-space offset of the current eye from the game camera (for
 // eyePositionWS), or false when disabled.
