@@ -970,6 +970,19 @@ static void TraceDraw(ID3D11DeviceContext* self, UINT count)
     Log("[uitrace] #%d vs %d %s rt %p%s ds %p %ux%u vp %.0f,%.0f %.0fx%.0f count %u ps %p [%s]",
         g_traceN++, vsId, cam ? "3D" : "--", res, res && res == g_backbuffer ? " (SWAPCHAIN)" : "", dsRes, w, h,
         vp.TopLeftX, vp.TopLeftY, vp.Width, vp.Height, count, st.currentPS, pn != g_psNames.end() ? pn->second.c_str() : "");
+    if (it != g_offsets.end())
+    {
+        // Every camera matrix this draw's shader has (viewprojection etc.).
+        auto sh = g_cbShadow.find(st.currentSlot0CB);
+        if (sh != g_cbShadow.end() && sh->second.valid)
+            for (const PatchVar& p : it->second.patches)
+                if (p.kind == PatchKind::Clip && p.offset + 64 <= sh->second.data.size())
+                {
+                    const float* m = reinterpret_cast<const float*>(sh->second.data.data() + p.offset);
+                    Log("[uitrace]     clip@%u [%.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f | %.4f %.4f %.4f %.4f]", p.offset,
+                        m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11], m[12], m[13], m[14], m[15]);
+                }
+    }
     if (it != g_offsets.end() && it->second.hasMVP)
     {
         auto sh = g_cbShadow.find(st.currentSlot0CB);
