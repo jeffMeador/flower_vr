@@ -1343,6 +1343,7 @@ static bool GuiImageViewports(ID3D11DeviceContext* self, D3D11_VIEWPORT vp[2], D
 {
     auto off = g_offsets.find(g_contextState[self].currentVS);
     if (off == g_offsets.end() || !off->second.guiImage || !g_backbuffer || !StereoHasEyePoses()) return false;
+    if (wcscmp(Game().name, L"Journey") != 0) return false; // Flower has GuiImage too: its menus stay as they were
     if (IsScreenFill(self)) return false; // a screen fade: stays full screen in both eyes
     ID3D11RenderTargetView* rtv = nullptr;
     self->OMGetRenderTargets(1, &rtv, nullptr);

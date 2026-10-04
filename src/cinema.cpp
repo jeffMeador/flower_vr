@@ -3,6 +3,7 @@
 #include "shadow.h"
 #include "uisign.h"
 #include "log.h"
+#include "game.h"
 #include "fakepad.h"
 #include "journeycam.h"
 #include <Windows.h>
@@ -162,8 +163,11 @@ void CinemaInit(const wchar_t* ini)
 {
     wcscpy_s(g_ini, ini);
     wchar_t mode[32], buf[32];
-    GetPrivateProfileStringW(L"xr", L"cinematicMode", L"auto", mode, 32, ini);
-    g_auto = _wcsicmp(mode, L"screen") != 0 && _wcsicmp(mode, L"follow") != 0;
+    // Automatic mode is Journey's (it reads Journey's camera and cutscenes);
+    // other games default to full VR.
+    const bool journey = !wcscmp(Game().name, L"Journey");
+    GetPrivateProfileStringW(L"xr", L"cinematicMode", journey ? L"auto" : L"follow", mode, 32, ini);
+    g_auto = journey && _wcsicmp(mode, L"screen") != 0 && _wcsicmp(mode, L"follow") != 0;
     g_toggleEnabled = GetPrivateProfileIntW(L"debug", L"cinemaToggle", 0, ini) != 0;
     g_noIdleScreen = GetPrivateProfileIntW(L"debug", L"noIdleScreen", 0, ini) != 0; // tests: the idle screen in VR
     g_on = g_auto || _wcsicmp(mode, L"screen") == 0;
