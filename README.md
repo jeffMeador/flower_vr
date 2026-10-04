@@ -8,6 +8,8 @@ An unofficial VR mod for the PC version of [Flower](https://thatgamecompany.com/
 
 You fly as the wind, with the petals just ahead of you; turning your head looks around the world, and tilting the controller steers, like the original PS3 tilt controls.
 
+**New: [Journey](https://thatgamecompany.com/journey/) (Steam) in alpha.** The same DLL also runs Journey in VR: see [Journey (alpha)](#journey-alpha).
+
 Fan project, not affiliated with or endorsed by thatgamecompany or Annapurna Interactive. You need your own copy of the game.
 
 ## Features
@@ -86,6 +88,39 @@ Keyboard hotkeys (only while the game window has focus): F6 recenter the view, `
 | `[xr] maxSquare` | 2644 | Must match the square resolution in `vrmod_Flower.cfg`. |
 
 Resolution, MSAA and grass density are in `vrmod_Flower.cfg` (`Screen Width/Height`, `MultiSampleCount`, the `Grass` section). Keep the resolution square.
+
+## Journey (alpha)
+
+The same `d3d11.dll` runs **Journey (Steam version)** in VR. It's playable through most of the game, but rough in places; see the known issues below. Download it from the [v1.2-alpha release](https://github.com/jeffMeador/flower_vr/releases/tag/v1.2-alpha) (the "latest release" link still points to the stable Flower build).
+
+**Install:** same as Flower, into the Journey folder (in Steam: right-click Journey → Manage → Browse local files): copy `d3d11.dll` next to `Journey.exe`, and copy `C:\Windows\System32\d3d11.dll` there renamed to `d3d11_orig.dll`. On first launch the mod creates `vrmod.ini` and `vrmod_Journey.cfg` (a copy of your Journey settings with a square window); your normal Journey settings are left alone.
+
+**Play:** connect the headset to SteamVR, then launch Journey. On a Steam Frame, connect Steam Link VR before or right after launching; Journey waits on a black screen until SteamVR has the headset.
+
+| Control | Action |
+|---|---|
+| Left thumbstick | Walk |
+| Right thumbstick | Turn the camera |
+| A / X / trigger | Jump and fly |
+| B / Y / grip | Sing (hold for a louder call) |
+| Menu button | Pause |
+
+What it does:
+- **You play in full VR,** with head tracking and the culling, terrain and shadows following your head.
+- **The title screen, menus and cutscenes play on a big widescreen in front of you,** with a fade through white when switching. Free head movement inside the game's cutscene shots made people sick and showed unfinished parts of the scenes.
+- **Pause and the idle screen stay in VR;** the "JOURNEY" logo is hidden there.
+- **The "JOURNEY" title stands in the world,** and tutorial prompts are placed at a comfortable distance.
+- **Depth of field and motion blur are off; the heat shimmer is reduced** to monitor strength (`[stereo] heatShimmer`, 0 to 1, default 0.3).
+- **Online companions work.** The mod only changes what you see, not the game's movement or network data.
+
+Journey settings in `vrmod.ini`: `[xr] cinematicMode` (`auto`, `follow` = always VR, `screen` = always the screen), `cinemaSize`/`cinemaDistance`/`cinemaAspect` (the screen, meters), `cameraSteady` (seconds of smoothing on the camera's distance to you, 0 = off), `promptDistance` (meters). `[debug] cinemaToggle=1` lets the right thumbstick click switch screen/VR by hand.
+
+Known issues (alpha):
+- **Cutscene detection misses some scenes:** some end-of-chapter visions and story scenes play in VR instead of on the screen.
+- **Idle and some cutscene camera angles feel off in VR.**
+- **Some distant lights and flames flicker differently in each eye.**
+- **The game must be launched with the headset already in SteamVR** (on the Frame: Steam Link VR connected); launching from the Frame's flat library without that stays on a black screen.
+- Tested on one setup (RTX 5090, Steam Frame via Steam Link).
 
 ## How it works
 
