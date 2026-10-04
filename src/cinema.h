@@ -16,9 +16,12 @@ void CinemaToggle();
 // prompt was drawn (you have control). CinemaUpdate once per frame.
 void CinemaNoteUiLayer();
 void CinemaNotePrompt();
-// A camera cut to a camera this far (game units) from the player: close means
-// the shot you play from (the end of the intro).
-void CinemaNoteCameraCut(float distToPlayer);
+// A camera cut to a camera this far (game units) from the player; settled:
+// called again once that shot has held still (close + settled = the shot you
+// play from, the end of the intro). Far cuts under a title = the idle screen.
+void CinemaNoteCameraCut(float distToPlayer, bool settled);
+// A title card (the "JOURNEY" logo) was drawn this frame.
+void CinemaNoteTitle();
 void CinemaUpdate();
 // Once per Present, before the eyes go to the headset: replaces both eye
 // images with the screen when cinema mode is on.

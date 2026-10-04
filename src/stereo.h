@@ -108,6 +108,9 @@ bool StereoRefPointToClip(int eye, const float p[3], float clip[4]);
 void StereoPatchView(float* m);
 // Eye currently being patched for (double render: 0 left, 1 right).
 int StereoRenderEye();
+// The game camera's view-projection (row-major, clip = M v) as last observed,
+// and its forward axis in world space.
+bool StereoGameViewProj(float m[16], float fwd[3]);
 // Depth-to-world rays for an eye. Journey's screen-space effects rebuild a
 // pixel's world position as eye + depth * (O + (1-u) U + (1-v) V) from the
 // game camera's values; this gives the eye's own O, U, V and position.

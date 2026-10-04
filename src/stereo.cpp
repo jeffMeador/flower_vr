@@ -15,6 +15,7 @@ static bool  g_projKnown = false;
 static uint64_t g_projFrame = 0; // frame the camera was last observed
 static float g_xs = 0, g_ys = 0, g_A = 0, g_B = 0;
 static float g_right[3] = {}, g_up[3] = {}, g_fwd[3] = {}; // canonical axes in world space
+static Mat4 g_lastVP{};                                      // the game camera's view-projection, as observed
 
 struct EyePose { bool set = false; float rot[9]; float pos[3]; };
 struct DisplayFov { bool set = false; float tanL, tanR, tanU, tanD, cropX, cropY; };
@@ -190,6 +191,7 @@ void StereoObserveViewProj(const Mat4& vp)
 
     if (c0 != g_xs || c1 != g_ys || A != g_A || B != g_B) ++g_key;
     g_xs = c0; g_ys = c1; g_A = A; g_B = B;
+    g_lastVP = vp;
     for (int i = 0; i < 3; ++i)
     {
         g_right[i] = vp.m[0][i] / c0;
@@ -577,5 +579,13 @@ bool StereoEyeRays(int eye, const float O[3], const float U[3], const float V[3]
         // with minus it sits under the feet in both eyes, head straight or turned.
         E2[k] = E[k] - (M[k][0] * e[0] + M[k][1] * e[1] + M[k][2] * e[2]);
     }
+    return true;
+}
+
+bool StereoGameViewProj(float m[16], float fwd[3])
+{
+    if (!g_projKnown) return false;
+    memcpy(m, &g_lastVP, 64);
+    memcpy(fwd, g_fwd, sizeof(g_fwd));
     return true;
 }

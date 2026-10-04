@@ -39,12 +39,24 @@ void CinemaNotePrompt()
     if (g_latched && (!g_lastUi || GetTickCount() - g_lastUi > 1000)) { g_latched = false; Log("[cinema] prompt seen: you have control"); }
 }
 
-void CinemaNoteCameraCut(float distToPlayer)
+static DWORD g_lastTitle = 0; // a title card (the "JOURNEY" logo) was drawn
+
+void CinemaNoteTitle() { g_lastTitle = GetTickCount(); }
+
+void CinemaNoteCameraCut(float distToPlayer, bool settled)
 {
-    if (g_latched && distToPlayer < 4.0f && (!g_lastUi || GetTickCount() - g_lastUi > 1000))
+    const DWORD now = GetTickCount();
+    // The idle screen: a flight of far shots with the logo over them -> the screen.
+    if (!settled && distToPlayer >= 4.0f && g_lastTitle && now - g_lastTitle < 3000)
+    {
+        if (!g_latched) Log("[cinema] title over a camera flight (idle screen): screen");
+        CinemaNoteUiLayer();
+        return;
+    }
+    if (settled && g_latched && distToPlayer < 4.0f && (!g_lastUi || now - g_lastUi > 1000))
     {
         g_latched = false;
-        Log("[cinema] camera cut to the player (%.1f units away): full VR", distToPlayer);
+        Log("[cinema] settled on the player (%.1f units away): full VR", distToPlayer);
     }
 }
 

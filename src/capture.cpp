@@ -23,7 +23,8 @@
 // What to do with one cbuffer variable when rendering a given eye.
 // OldClip = previous frame's MVP (motion blur); with motion blur off in VR it's
 // set equal to this frame's (patched) MVP, so nothing appears to move.
-enum class PatchKind { Clip, OldClip, View, EyePos, LensFov, PointSize };
+// RayO/U/V: a full-screen pass's depth-to-world rays (projPlaneOrigin/U/V, e.g. Journey's fog).
+enum class PatchKind { Clip, OldClip, View, EyePos, LensFov, PointSize, RayO, RayU, RayV };
 
 struct PatchVar
 {
@@ -240,6 +241,12 @@ static void ReflectAndCacheOffsets(ID3D11VertexShader* shader, const void* bytec
                 offsets.patches.push_back({ PatchKind::PointSize, varDesc.StartOffset });
             else if (n == "eyepositionws")
                 offsets.patches.push_back({ PatchKind::EyePos, varDesc.StartOffset });
+            else if (n == "projplaneorigin" || n == "prjplaneorigin")
+                offsets.patches.push_back({ PatchKind::RayO, varDesc.StartOffset });
+            else if (n == "projplaneu" || n == "prjplaneu")
+                offsets.patches.push_back({ PatchKind::RayU, varDesc.StartOffset });
+            else if (n == "projplanev" || n == "prjplanev")
+                offsets.patches.push_back({ PatchKind::RayV, varDesc.StartOffset });
             else if (n == "model")
             {
                 offsets.hasModel = true;
@@ -257,7 +264,7 @@ static void ReflectAndCacheOffsets(ID3D11VertexShader* shader, const void* bytec
     std::vector<PatchVar> kept;
     for (auto& p : offsets.patches)
     {
-        if (p.offset + (p.kind == PatchKind::EyePos ? 12u : (p.kind == PatchKind::LensFov || p.kind == PatchKind::PointSize) ? 4u : 64u) > offsets.cbSize)
+        if (p.offset + (p.kind == PatchKind::EyePos || p.kind == PatchKind::RayO || p.kind == PatchKind::RayU || p.kind == PatchKind::RayV ? 12u : (p.kind == PatchKind::LensFov || p.kind == PatchKind::PointSize) ? 4u : 64u) > offsets.cbSize)
             continue;
         // A lone "fov" without R/maxRadius isn't the lens shader.
         if (p.kind == PatchKind::LensFov && !(offsets.hasLensR && offsets.hasLensMaxR))
@@ -555,7 +562,7 @@ static bool BuildPatched(const ShaderOffsets& off, const std::vector<uint8_t>& o
     {
         for (const PatchVar& p : off.patches)
         {
-            if (p.offset + (p.kind == PatchKind::EyePos ? 12u : (p.kind == PatchKind::LensFov || p.kind == PatchKind::PointSize) ? 4u : 64u) > patched.size()) continue;
+            if (p.offset + (p.kind == PatchKind::EyePos || p.kind == PatchKind::RayO || p.kind == PatchKind::RayU || p.kind == PatchKind::RayV ? 12u : (p.kind == PatchKind::LensFov || p.kind == PatchKind::PointSize) ? 4u : 64u) > patched.size()) continue;
             float* f = reinterpret_cast<float*>(patched.data() + p.offset);
             switch (p.kind)
             {
@@ -590,6 +597,8 @@ static bool BuildPatched(const ShaderOffsets& off, const std::vector<uint8_t>& o
             case PatchKind::EyePos:
                 if (eyePos) { f[0] += eyeOff[0]; f[1] += eyeOff[1]; f[2] += eyeOff[2]; any = true; }
                 break;
+            case PatchKind::RayO: case PatchKind::RayU: case PatchKind::RayV:
+                break; // below, all three together
             case PatchKind::LensFov:
             {
                 // Fisheye mapping uv = 0.5 + xy * R*tan(r/maxR * fov/2)/r.
@@ -624,6 +633,34 @@ static bool BuildPatched(const ShaderOffsets& off, const std::vector<uint8_t>& o
                 any = true;
                 break;
             }
+            }
+        }
+    }
+    // Depth-to-world rays computed in the vertex shader (Journey's fog): the
+    // game camera's, so each eye's fog distances and heights were measured
+    // along the wrong rays - the haze differed between the eyes.
+    {
+        int ro = -1, ru = -1, rv = -1, re = -1;
+        for (const PatchVar& p : off.patches)
+        {
+            if (p.offset + 12 > orig.size()) continue;
+            if (p.kind == PatchKind::RayO) ro = (int)p.offset;
+            else if (p.kind == PatchKind::RayU) ru = (int)p.offset;
+            else if (p.kind == PatchKind::RayV) rv = (int)p.offset;
+            else if (p.kind == PatchKind::EyePos) re = (int)p.offset;
+        }
+        if (ro >= 0 && ru >= 0 && rv >= 0)
+        {
+            const float zero[3] = {};
+            const float* E = re >= 0 ? reinterpret_cast<const float*>(orig.data() + re) : zero;
+            float O2[3], U2[3], V2[3], E2[3];
+            if (StereoEyeRays(StereoRenderEye(), reinterpret_cast<const float*>(orig.data() + ro), reinterpret_cast<const float*>(orig.data() + ru),
+                              reinterpret_cast<const float*>(orig.data() + rv), E, O2, U2, V2, E2))
+            {
+                memcpy(patched.data() + ro, O2, 12);
+                memcpy(patched.data() + ru, U2, 12);
+                memcpy(patched.data() + rv, V2, 12);
+                any = true;
             }
         }
     }
@@ -1117,6 +1154,120 @@ static ID3D11VertexShader* GuiTitleVS(ID3D11DeviceContext* self)
     return vs;
 }
 
+// Titles in full VR (the "JOURNEY" logo as you walk): pinned in the world. When
+// one appears, the game's screen is anchored as a plane kTitleDist units out
+// along where the game camera looked, as big as the game's own (monitor) view
+// of it there; the logo is drawn on that plane per eye. It stays put when you
+// turn your head and barely moves as you walk, like a sign over the mountains.
+static const float kTitleDist = 300.0f;
+static ID3D11VertexShader* GuiWorldVS(ID3D11DeviceContext* self)
+{
+    static ID3D11VertexShader* vs = nullptr;
+    static bool tried = false;
+    if (vs || tried) return vs;
+    tried = true;
+    static const char kSrc[] =
+        "cbuffer G : register(b0) { float4 c[33]; };\n"
+        "cbuffer W : register(b1) { row_major float4x4 M; };\n"
+        "struct I { float3 p : POSITION; float2 uv : TEXCOORD0; };\n"
+        "struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
+        "O main(I i) {\n"
+        "  float s, co; sincos(c[30].x, s, co);\n"
+        "  float2 cp = c[31].xy; float a = c[32].x;\n"
+        "  float2 off = float2(i.p.x * a - cp.x * a, i.p.y - cp.y);\n"
+        "  float2 np = float2(co * off.x - s * off.y, s * off.x + co * off.y);\n"
+        "  float2 ndc = float2((cp.x * a + np.x) / a, cp.y + np.y);\n"
+        "  O o; o.p = mul(M, float4(ndc, 0, 1)); o.uv = i.uv; return o;\n"
+        "}\n";
+    ID3DBlob* b = nullptr, * err = nullptr;
+    if (FAILED(D3DCompile(kSrc, sizeof(kSrc) - 1, "guiworld_vs", nullptr, nullptr, "main", "vs_5_0", 0, 0, &b, &err)))
+    {
+        Log("[gui] world title shader compile failed: %s", err ? (const char*)err->GetBufferPointer() : "?");
+        if (err) err->Release();
+        return nullptr;
+    }
+    ID3D11Device* dev = nullptr;
+    self->GetDevice(&dev);
+    if (dev) { dev->CreateVertexShader(b->GetBufferPointer(), b->GetBufferSize(), nullptr, &vs); dev->Release(); }
+    b->Release();
+    return vs;
+}
+
+template <class F>
+static bool TitleWorldDraw(ID3D11DeviceContext* self, F&& draw)
+{
+    static DWORD lastSeen = 0;
+    static float W[16];                      // game screen (ndc x, y) -> world, column-vector
+    static ID3D11Buffer* cb[2] = {};
+    const DWORD now = GetTickCount();
+    ID3D11VertexShader* vs = GuiWorldVS(self);
+    float vp[16], fwdNow[3];
+    if (!vs || !StereoGameViewProj(vp, fwdNow)) return false;
+    if (!lastSeen || now - lastSeen > 2000)
+    {
+        float pos[3], right[3], up[3], z[3];
+        const float fov = JourneyCamGameFov();
+        if (!JourneyCamGamePose(pos, right, up, z) || fov < 5.0f || fov > 170.0f) return false;
+        const float sgn = (z[0] * fwdNow[0] + z[1] * fwdNow[1] + z[2] * fwdNow[2]) >= 0.0f ? 1.0f : -1.0f;
+        const float half = kTitleDist * tanf(fov * 0.5f * 0.0174533f);
+        const float C[3] = { pos[0] + sgn * z[0] * kTitleDist, pos[1] + sgn * z[1] * kTitleDist, pos[2] + sgn * z[2] * kTitleDist };
+        const float Wm[16] = { right[0] * half, up[0] * half, 0, C[0],
+                               right[1] * half, up[1] * half, 0, C[1],
+                               right[2] * half, up[2] * half, 0, C[2],
+                               0, 0, 0, 1 };
+        memcpy(W, Wm, sizeof(W));
+        Log("[gui] title pinned in the world %.0f units ahead", kTitleDist);
+    }
+    lastSeen = now;
+    if (!cb[0])
+    {
+        ID3D11Device* dev = nullptr;
+        self->GetDevice(&dev);
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = 64; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        if (dev) { dev->CreateBuffer(&bd, nullptr, &cb[0]); dev->CreateBuffer(&bd, nullptr, &cb[1]); dev->Release(); }
+        if (!cb[0] || !cb[1]) return false;
+    }
+    // Per eye: K_eye * VP * W.
+    float M[2][16];
+    for (int e = 0; e < 2; ++e)
+    {
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c)
+            {
+                float v = 0;
+                for (int k = 0; k < 4; ++k) v += vp[r * 4 + k] * W[k * 4 + c];
+                M[e][r * 4 + c] = v;
+            }
+        StereoSetRenderEye(e);
+        StereoPatchClip(M[e]);
+    }
+    StereoSetRenderEye(0);
+    auto one = [&](ID3D11DeviceContext* c, int e) {
+        c->UpdateSubresource(cb[e], 0, nullptr, M[e], 0, 0);
+        ID3D11VertexShader* oldVS = nullptr; c->VSGetShader(&oldVS, nullptr, nullptr);
+        ID3D11Buffer* oldCB = nullptr; c->VSGetConstantBuffers(1, 1, &oldCB);
+        c->VSSetShader(vs, nullptr, 0);
+        c->VSSetConstantBuffers(1, 1, &cb[e]);
+        draw(c);
+        c->VSSetShader(oldVS, nullptr, 0);
+        c->VSSetConstantBuffers(1, 1, &oldCB);
+        if (oldVS) oldVS->Release();
+        if (oldCB) oldCB->Release();
+    };
+    {
+        ShadowBypass g;
+        one(self, 0);
+    }
+    if (Stereo().doubleRender && MirrorActive() && MirrorRightOutputsValid())
+    {
+        ShadowBypass g;
+        one(MirrorContext(), 1);
+        MirrorNoteDraw();
+    }
+    return true;
+}
+
 static bool IsScreenFill(ID3D11DeviceContext* self)
 {
     UINT w, h; float alpha;
@@ -1218,7 +1369,7 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
             if (w > 16 && alpha > 0.05f)
             {
                 if (h >= 2 * w) CinemaNotePrompt();
-                else CinemaNoteUiLayer();
+                else CinemaNoteTitle();
             }
         }
         else
@@ -1275,6 +1426,16 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
             StereoSetRenderEye(0);
         }
         return;
+    }
+    if (!ShadowBypassed() && StereoPatchKey() != 0 && !CinemaActive() && g_backbuffer && !wcscmp(Game().name, L"Journey"))
+    {
+        auto o = g_offsets.find(g_contextState[self].currentVS);
+        if (o != g_offsets.end() && o->second.guiImage)
+        {
+            UINT tw, th; float ta;
+            GuiImageInfo(self, tw, th, ta);
+            if (tw > 16 && th < 2 * tw && TitleWorldDraw(self, draw)) return; // a title (not a fade, not a prompt)
+        }
     }
     D3D11_VIEWPORT giVp[2], giOrig;
     bool giCinema = false, giTitle = false;

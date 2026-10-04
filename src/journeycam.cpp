@@ -278,6 +278,16 @@ bool JourneyCamInstall(float fovDegrees, bool headCamera)
 
 float JourneyCamGameFov() { return g_gameFov; }
 float JourneyCamSpeed() { return g_camSpeed; }
+bool JourneyCamGamePose(float pos[3], float right[3], float up[3], float z[3])
+{
+    // The game's own camera (not head-turned): the world transform as UpdateView saw it.
+    if (!g_sceneCam) return false;
+    const float* w = g_frameWorld ? g_frameOrig : *(float**)(g_sceneCam + 0xC0);
+    if (!w) return false;
+    for (int i = 0; i < 3; ++i) { up[i] = w[i]; z[i] = w[4 + i]; pos[i] = w[8 + i]; }
+    right[0] = w[3]; right[1] = w[7]; right[2] = w[11];
+    return true;
+}
 void JourneyCamSetCinema(float aspect) { g_cinemaAspect = aspect; }
 
 void JourneyCamTick(bool enable)
@@ -295,18 +305,29 @@ void JourneyCamTick(bool enable)
         static float last[3] = {};
         const float d[3] = { g_camPos[0] - last[0], g_camPos[1] - last[1], g_camPos[2] - last[2] };
         g_camSpeed = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+        // Camera cuts. The intro's last shots are close to the character
+        // (within 4 units; every other shot is 30-190 away) - but so is the
+        // end of the flight, which follows the falling star (you). The switch
+        // to full VR waits for a close cut that then holds still for half a
+        // second: the flight never does, the final shot of the character does.
+        static int stillFrames = -1; // -1: no close cut pending
+        static float cutDist = 0.0f;
         if (g_camSpeed > 3.0f)
         {
-            // A camera cut. The intro's last shots cut to the character from
-            // close behind (2.9 units; every other shot is 30-190 away), and
-            // that shot carries on into gameplay: automatic cinema mode goes
-            // to full VR there rather than seconds later at the first prompt.
             float pp[3];
+            stillFrames = -1;
             if (CapturePlayerPos(pp))
             {
                 const float dx = pp[0] - g_camPos[0], dy = pp[1] - g_camPos[1], dz = pp[2] - g_camPos[2];
-                CinemaNoteCameraCut(sqrtf(dx * dx + dy * dy + dz * dz));
+                cutDist = sqrtf(dx * dx + dy * dy + dz * dz);
+                CinemaNoteCameraCut(cutDist, false);
+                if (cutDist < 4.0f) stillFrames = 0;
             }
+        }
+        else if (stillFrames >= 0)
+        {
+            if (g_camSpeed > 0.03f) stillFrames = 0;
+            else if (++stillFrames >= 45) { CinemaNoteCameraCut(cutDist, true); stillFrames = -1; }
         }
         memcpy(last, g_camPos, sizeof(last));
     }
