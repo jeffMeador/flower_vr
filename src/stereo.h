@@ -89,7 +89,33 @@ uint64_t StereoPatchKey();
 // Rewrite a perspective clip matrix / a modelView matrix for the current eye,
 // in place (row-major float[16]).
 void StereoPatchClip(float* m);
+// Sideways NDC shift that makes a flat overlay appear `meters` ahead in this
+// eye (crossed disparity from the tracked eye separation); 0 without it.
+float StereoOverlayNdcShift(int eye, float meters);
+// Where a point at (x, y) on the game's screen (NDC, far away) lands on an
+// eye's screen (NDC). False while no 3D camera is live.
+bool StereoMapNdc(int eye, float x, float y, float* ox, float* oy);
+// Where a point in the headset's reference space (meters, OpenXR axes: x right,
+// y up, z back; the game camera looks along -z) lands on an eye's screen (NDC),
+// using that eye's tracked pose and display FOV. False without them or if the
+// point is behind the eye.
+bool StereoProjectRefPoint(int eye, const float p[3], float* ox, float* oy);
+void StereoSetMono(bool mono); // cinema mode: no per-eye changes at all
+bool StereoHasEyePoses(); // both eyes' tracked poses and display FOVs are known
+// The same point as clip-space coordinates for drawing (perspective-correct,
+// depth just past the near plane); points behind the eye come out with w <= 0.
+bool StereoRefPointToClip(int eye, const float p[3], float clip[4]);
 void StereoPatchView(float* m);
+// Eye currently being patched for (double render: 0 left, 1 right).
+int StereoRenderEye();
+// The game camera's view-projection (row-major, clip = M v) as last observed,
+// and its forward axis in world space.
+bool StereoGameViewProj(float m[16], float fwd[3]);
+// Depth-to-world rays for an eye. Journey's screen-space effects rebuild a
+// pixel's world position as eye + depth * (O + (1-u) U + (1-v) V) from the
+// game camera's values; this gives the eye's own O, U, V and position.
+bool StereoEyeRays(int eye, const float O[3], const float U[3], const float V[3], const float E[3],
+                   float O2[3], float U2[3], float V2[3], float E2[3]);
 
 // World-space offset of the current eye from the game camera (for
 // eyePositionWS), or false when disabled.

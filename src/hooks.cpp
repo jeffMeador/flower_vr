@@ -8,6 +8,8 @@
 #include "xr.h"
 #include "stereo.h"
 #include "camfind.h"
+#include "journeycam.h"
+#include "cinema.h"
 #include "camoverride.h"
 #include "shadow.h"
 #include "mirror.h"
@@ -28,9 +30,12 @@ bool HooksPassthrough()
     return GetPrivateProfileIntW(L"debug", L"passthrough", 0, ini) != 0;
 }
 
+static bool g_forceGameFov = false; // [debug] forceGameFov=1: Journey FOV override without VR (testing)
+
 void SetHooksDllDir(const wchar_t* dir)
 {
     wcscpy_s(g_dllDir, dir);
+    CamFindSetDir(dir);
 }
 
 // Minimal 32bpp BMP writer for verifying frames visually without extra deps.
@@ -63,6 +68,28 @@ static void DumpBackbufferBMP(IDXGISwapChain* swapChain, uint64_t frameIndex, bo
     D3D11_TEXTURE2D_DESC desc = {};
     backbuffer->GetDesc(&desc);
 
+    if (desc.SampleDesc.Count > 1)
+    {
+        // Multisampled backbuffer (Journey): resolve it, then read the resolved copy.
+        D3D11_TEXTURE2D_DESC rd = desc;
+        rd.SampleDesc = { 1, 0 };
+        rd.Usage = D3D11_USAGE_DEFAULT;
+        rd.BindFlags = 0;
+        rd.CPUAccessFlags = 0;
+        rd.MiscFlags = 0;
+        ID3D11Texture2D* resolved = nullptr;
+        if (FAILED(device->CreateTexture2D(&rd, nullptr, &resolved)) || !resolved)
+        {
+            Log("[dump] could not create a resolve texture (%ux%u, %u samples)", desc.Width, desc.Height, desc.SampleDesc.Count);
+            backbuffer->Release(); if (ctx) ctx->Release(); device->Release();
+            return;
+        }
+        ctx->ResolveSubresource(resolved, 0, backbuffer, 0, desc.Format);
+        backbuffer->Release();
+        backbuffer = resolved;
+        desc = rd;
+    }
+
     D3D11_TEXTURE2D_DESC stagingDesc = desc;
     stagingDesc.Usage = D3D11_USAGE_STAGING;
     stagingDesc.BindFlags = 0;
@@ -72,6 +99,7 @@ static void DumpBackbufferBMP(IDXGISwapChain* swapChain, uint64_t frameIndex, bo
     ID3D11Texture2D* staging = nullptr;
     if (FAILED(device->CreateTexture2D(&stagingDesc, nullptr, &staging)) || !staging)
     {
+        Log("[dump] could not create a staging texture (%ux%u, fmt %d)", desc.Width, desc.Height, (int)desc.Format);
         backbuffer->Release();
         if (ctx) ctx->Release();
         device->Release();
@@ -254,12 +282,20 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
     int renderedEye = Stereo().doubleRender ? 2 : StereoCurrentEye();
     ShadowBypass bypass; // our own context calls below must not be mirrored
     g_blockN++;
+    CinemaUpdate();
+    CinemaCompose(This, timingCtx);
     { BlockTimer bt(g_xrSum, g_xrWorst); XrSubmitFrame(This, renderedEye); }
     CamOverrideTick(XrSessionActive());
+    JourneyCamTick((XrSessionActive() || g_forceGameFov) && !CinemaActive());
+    JourneyCamSetCinema(XrSessionActive() && CinemaActive() ? CinemaAspect() : 0.0f);
     {
         DXGI_SWAP_CHAIN_DESC scd = {};
         This->GetDesc(&scd);
         if (scd.BufferDesc.Height) CamFindTick((float)scd.BufferDesc.Width / scd.BufferDesc.Height);
+    }
+    {
+        ID3D11Resource* bb = nullptr;
+        if (SUCCEEDED(This->GetBuffer(0, __uuidof(ID3D11Resource), (void**)&bb)) && bb) { CaptureSetBackbuffer(bb); bb->Release(); }
     }
     NotifyCaptureFrameBoundary();
 
@@ -268,22 +304,47 @@ static HRESULT STDMETHODCALLTYPE HookedPresent(IDXGISwapChain* This, UINT SyncIn
 
     // F12 dumps the next two frames: consecutive frames hold both eyes under
     // alternate-eye stereo. (Periodic dumps at 7680x2160 cost ~50MB each.)
-    static int dumpRemaining = 0;
+    static int dumpRemaining = 0, dumpEvery = 1;
     if (KeyEdge(VK_F12))
-        dumpRemaining = 2;
+        dumpRemaining = 2, dumpEvery = 1;
     // Remote trigger (hotkeys need the game in focus): a file named vrmod_dump
     // next to the DLL dumps the next frame's eyes and is removed.
     if ((frame % 30) == 0)
     {
         wchar_t trig[MAX_PATH];
         swprintf_s(trig, L"%s\\vrmod_dump", g_dllDir);
-        if (GetFileAttributesW(trig) != INVALID_FILE_ATTRIBUTES && DeleteFileW(trig))
+        if (GetFileAttributesW(trig) != INVALID_FILE_ATTRIBUTES)
         {
-            dumpRemaining = 1;
-            Log("[dump] requested by file");
+            // Optional contents "<count> <every>": a series of dumps, one every <every> frames.
+            int count = 1, every = 1;
+            if (FILE* f = _wfopen(trig, L"r")) { if (fscanf(f, "%d %d", &count, &every) < 1) count = 1; fclose(f); }
+            if (DeleteFileW(trig))
+            {
+                dumpRemaining = count < 1 ? 1 : count;
+                dumpEvery = every < 1 ? 1 : every;
+                Log("[dump] requested by file (%d, every %d frames)", dumpRemaining, dumpEvery);
+            }
         }
     }
-    if (frame < 2 || dumpRemaining > 0)
+    // [debug] dumpSpeed=<units/frame>: dump every frame while the Journey camera
+    // moves faster (fast camera flights), up to dumpSpeedCount frames.
+    static int speedBudget = -1;
+    static float speedMin = 0.0f;
+    if (speedBudget < 0)
+    {
+        wchar_t ini[MAX_PATH], buf[32];
+        swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
+        GetPrivateProfileStringW(L"debug", L"dumpSpeed", L"0", buf, 32, ini);
+        speedMin = (float)_wtof(buf);
+        speedBudget = speedMin > 0.0f ? GetPrivateProfileIntW(L"debug", L"dumpSpeedCount", 300, ini) : 0;
+    }
+    if ((frame % 60) == 0 && speedMin > 0.0f) Log("[dump] frame %u camera speed %.3f", frame, JourneyCamSpeed());
+    if (speedBudget > 0 && JourneyCamSpeed() > speedMin && dumpRemaining == 0)
+    {
+        speedBudget--;
+        dumpRemaining = 1, dumpEvery = 1;
+    }
+    if (frame < 2 || (dumpRemaining > 0 && frame % dumpEvery == 0))
     {
         DumpBackbufferBMP(This, frame);
         if (Stereo().doubleRender) DumpBackbufferBMP(This, frame, true);
@@ -340,6 +401,9 @@ void InstallHooksOnSwapChain(IDXGISwapChain* swapChain, ID3D11Device* device, ID
         swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
         GetPrivateProfileStringW(L"xr", L"gameFov", L"125", buf, 32, ini);
         CamOverrideInstall((float)_wtof(buf));
+        CinemaInit(ini);
+        JourneyCamInstall((float)_wtof(buf), GetPrivateProfileIntW(L"xr", L"headCamera", 0, ini) != 0);
+        g_forceGameFov = GetPrivateProfileIntW(L"debug", L"forceGameFov", 0, ini) != 0;
         CamOverrideSetHeadCamera(GetPrivateProfileIntW(L"xr", L"headCamera", 0, ini) != 0);
         CamOverrideSetTerrainClamp(GetPrivateProfileIntW(L"xr", L"terrainClamp", 0, ini) != 0);
     }

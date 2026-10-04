@@ -22,6 +22,9 @@ static unsigned char g_seq[96]; // order of hits by distinct-RIP index
 static void* g_watchAddr = nullptr;
 static PVOID g_veh = nullptr;
 static DWORD g_disarmAt = 0;
+static bool g_writeOnly = false;      // watch writes only (RW0 = 01) instead of reads and writes
+static DWORD64 g_ripRegs[32][16];     // registers at each instruction's first hit (rax..r15)
+static wchar_t g_watchFile[MAX_PATH]; // vrmod_watch.txt trigger (set by CamFindSetDir)
 
 static LONG WINAPI Handler(EXCEPTION_POINTERS* info)
 {
@@ -32,7 +35,14 @@ static LONG WINAPI Handler(EXCEPTION_POINTERS* info)
     LONG n = g_ripCount;
     int i = 0;
     for (; i < n; ++i) if (g_rips[i] == rip) break;
-    if (i == n && n < 32) { g_rips[n] = rip; InterlockedIncrement(&g_ripCount); }
+    if (i == n && n < 32)
+    {
+        g_rips[n] = rip;
+        const DWORD64 r[16] = { ctx->Rax, ctx->Rcx, ctx->Rdx, ctx->Rbx, ctx->Rsp, ctx->Rbp, ctx->Rsi, ctx->Rdi,
+                                ctx->R8, ctx->R9, ctx->R10, ctx->R11, ctx->R12, ctx->R13, ctx->R14, ctx->R15 };
+        memcpy(g_ripRegs[n], r, sizeof(r));
+        InterlockedIncrement(&g_ripCount);
+    }
     if (i < 32) InterlockedIncrement(&g_ripHits[i]);
     LONG sq = InterlockedIncrement(&g_seqCount) - 1;
     if (sq < 96) g_seq[sq] = (unsigned char)i;
@@ -63,7 +73,7 @@ static void SetWatchAllThreads(void* addr, bool arm)
                 {
                     c.Dr0 = (DWORD64)addr;
                     c.Dr7 &= ~((DWORD64)0xF << 16);
-                    c.Dr7 |= ((DWORD64)0x3 << 16); // RW0 = 11: read or write
+                    c.Dr7 |= ((DWORD64)(g_writeOnly ? 0x1 : 0x3) << 16); // RW0 = 01 write / 11 read or write
                     c.Dr7 |= ((DWORD64)0x3 << 18); // LEN0 = 11: 4 bytes
                     c.Dr7 |= 0x1;
                 }
@@ -109,6 +119,49 @@ static void LogRip(void* rip, LONG hits)
     const char* base = strrchr(name, '\\');
     Log("[camfind]   after-RIP %p = %s+0x%llX  hits=%ld", rip, base ? base + 1 : name,
         (unsigned long long)((char*)rip - (char*)mod), hits);
+}
+
+static void LogRegs(int i)
+{
+    const DWORD64* r = g_ripRegs[i];
+    Log("[camfind]     rax=%llx rcx=%llx rdx=%llx rbx=%llx rsp=%llx rbp=%llx rsi=%llx rdi=%llx",
+        r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7]);
+    Log("[camfind]     r8=%llx r9=%llx r10=%llx r11=%llx r12=%llx r13=%llx r14=%llx r15=%llx",
+        r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15]);
+}
+
+void CamFindSetDir(const wchar_t* dllDir) { swprintf_s(g_watchFile, L"%s\\vrmod_watch.txt", dllDir); }
+
+// vrmod_watch.txt: "<address> [w|rw]", address as hex or exe+0xRVA. Watched
+// for 2 s, then logged (with registers) and the file is removed.
+static bool WatchFromFile()
+{
+    if (!g_watchFile[0]) return false;
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, g_watchFile, L"r") != 0 || !f) return false;
+    char line[128] = {};
+    fgets(line, sizeof(line), f);
+    fclose(f);
+    DeleteFileW(g_watchFile);
+    unsigned long long a = 0;
+    char mode[8] = "rw";
+    if (!_strnicmp(line, "exe+", 4))
+    {
+        sscanf_s(line + 4, "%llx %7s", &a, mode, (unsigned)sizeof(mode));
+        a += (unsigned long long)GetModuleHandleW(nullptr);
+    }
+    else sscanf_s(line, "%llx %7s", &a, mode, (unsigned)sizeof(mode));
+    if (!a) { Log("[camfind] vrmod_watch.txt: no address in '%s'", line); return false; }
+    g_writeOnly = !_stricmp(mode, "w");
+    g_watchAddr = (void*)a;
+    g_ripCount = 0;
+    g_seqCount = 0;
+    for (auto& h : g_ripHits) h = 0;
+    if (!g_veh) g_veh = AddVectoredExceptionHandler(1, Handler);
+    Log("[camfind] watching %p for %s (from vrmod_watch.txt)", (void*)a, g_writeOnly ? "writes" : "reads and writes");
+    SetWatch((void*)a, true);
+    g_disarmAt = GetTickCount() + 2000;
+    return true;
 }
 
 static void ScanRegionUnsafe(float* f, size_t n, float aspect, float** best, int* found)
@@ -168,7 +221,8 @@ void CamFindTick(float backbufferAspect)
         g_disarmAt = 0;
         SetWatch(nullptr, false);
         Log("[camfind] %ld distinct instruction(s) touched fov at %p:", g_ripCount, g_watchAddr);
-        for (LONG i = 0; i < g_ripCount; ++i) { Log("[camfind]  #%ld:", i); LogRip(g_rips[i], g_ripHits[i]); }
+        for (LONG i = 0; i < g_ripCount; ++i) { Log("[camfind]  #%ld:", i); LogRip(g_rips[i], g_ripHits[i]); LogRegs(i); }
+        g_writeOnly = false;
         char buf[400] = {}; size_t n = 0;
         for (LONG k = 0; k < g_seqCount && k < 96; ++k) n += sprintf_s(buf + n, sizeof(buf) - n, "%d ", g_seq[k]);
         Log("[camfind] hit order (first 96): %s", buf);
@@ -176,6 +230,8 @@ void CamFindTick(float backbufferAspect)
         return;
     }
     if (g_disarmAt) return;
+    static int fileCheck = 0;
+    if (++fileCheck % 30 == 0 && WatchFromFile()) return;
     bool f7 = KeyEdge(VK_F7);
     if (f7 && (GetAsyncKeyState(VK_SHIFT) & 0x8000))
     {

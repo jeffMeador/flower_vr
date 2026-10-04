@@ -1,6 +1,7 @@
 #include "stereo.h"
 #include "log.h"
 #include "keys.h"
+#include "game.h"
 #include <cstdlib>
 
 static StereoConfig g_cfg;
@@ -14,6 +15,7 @@ static bool  g_projKnown = false;
 static uint64_t g_projFrame = 0; // frame the camera was last observed
 static float g_xs = 0, g_ys = 0, g_A = 0, g_B = 0;
 static float g_right[3] = {}, g_up[3] = {}, g_fwd[3] = {}; // canonical axes in world space
+static Mat4 g_lastVP{};                                      // the game camera's view-projection, as observed
 
 struct EyePose { bool set = false; float rot[9]; float pos[3]; };
 struct DisplayFov { bool set = false; float tanL, tanR, tanU, tanD, cropX, cropY; };
@@ -26,6 +28,9 @@ static uint64_t g_kKey[2] = {};
 static Mat4 g_K[2];
 static float g_viewShiftX[2] = {}; // canonical x translation of T (for modelView)
 static float g_eyeWorld[2][3] = {};
+static float g_tRot[2][9] = {};     // T's rotation: game canonical -> eye canonical (row-major)
+static float g_eyeCanonPos[2][3] = {}; // eye position in the rendered camera's canonical axes
+static float g_pnXY[2][4] = {};     // eye projection: sx, ox, sy, oy (ndc = s * q / qz + o)
 
 StereoConfig& Stereo() { return g_cfg; }
 
@@ -50,6 +55,10 @@ void StereoLoadConfig(const wchar_t* dllDir)
     GetPrivateProfileStringW(L"stereo", L"render", L"alternate", mode, 32, g_iniPath);
     g_cfg.doubleRender = _wcsicmp(mode, L"double") == 0;
     g_cfg.motionBlur = ReadIniFloat(L"motionBlur", 0.0f) != 0.0f;
+    // Journey: every head movement counts as camera motion for its motion blur,
+    // which smeared the whole view in VR (A/B with a turning test head). Off
+    // unless [stereo] journeyMotionBlur=1.
+    if (!wcscmp(Game().name, L"Journey")) g_cfg.motionBlur = ReadIniFloat(L"journeyMotionBlur", 0.0f) != 0.0f;
     g_cfg.depthOfField = ReadIniFloat(L"depthOfField", 0.0f) != 0.0f;
     g_cfg.sparkleSize = ReadIniFloat(L"sparkleSize", 0.5f);
     g_cfg.dofNear = ReadIniFloat(L"dofNear", 1.0f);
@@ -182,6 +191,7 @@ void StereoObserveViewProj(const Mat4& vp)
 
     if (c0 != g_xs || c1 != g_ys || A != g_A || B != g_B) ++g_key;
     g_xs = c0; g_ys = c1; g_A = A; g_B = B;
+    g_lastVP = vp;
     for (int i = 0; i < 3; ++i)
     {
         g_right[i] = vp.m[0][i] / c0;
@@ -308,8 +318,12 @@ static const DisplayFov* CurrentDisplay()
     return d.set ? &d : nullptr;
 }
 
+static bool g_mono = false; // cinema mode: draw the game's own flat view in both eyes
+void StereoSetMono(bool mono) { g_mono = mono; }
+
 uint64_t StereoPatchKey()
 {
+    if (g_mono) return 0;
     // Only while a 3D camera is live: menus/videos after a level must not be remapped with a stale camera.
     if (!g_projKnown || g_frame - g_projFrame >= 10) return 0;
     if (!(StereoCurrentEye() != 0 || g_cfg.doubleRender || CurrentDisplay() || g_activePoses[g_renderEye].set)) return 0;
@@ -381,6 +395,7 @@ static void BuildK()
         eyeCanon[0] = e;
     }
     g_viewShiftX[g_renderEye] = t.m[0][3];
+    for (int i = 0; i < 3; ++i) { for (int j = 0; j < 3; ++j) g_tRot[g_renderEye][i * 3 + j] = t.m[i][j]; g_eyeCanonPos[g_renderEye][i] = eyeCanon[i]; }
     for (int i = 0; i < 3; ++i)
         g_eyeWorld[g_renderEye][i] = eyeCanon[0] * g_right[i] + eyeCanon[1] * g_up[i] + eyeCanon[2] * g_fwd[i];
 
@@ -403,6 +418,8 @@ static void BuildK()
     pn.m[2][3] = g_B;
     pn.m[3][2] = 1.0f;
 
+    g_pnXY[g_renderEye][0] = pn.m[0][0]; g_pnXY[g_renderEye][1] = pn.m[0][2];
+    g_pnXY[g_renderEye][2] = pn.m[1][1]; g_pnXY[g_renderEye][3] = pn.m[1][2];
     g_K[g_renderEye] = Mat4Mul(Mat4Mul(pn, t), pinv);
     g_kKey[g_renderEye] = g_key;
     if ((g_frame % 450) == 0)
@@ -415,6 +432,19 @@ static void BuildK()
     }
 }
 
+float StereoOverlayNdcShift(int eye, float meters)
+{
+    // Crossed disparity of a point `meters` ahead, as a sideways NDC shift for
+    // this eye (+ left eye, - right eye); 0 without headset data.
+    const EyePose& a = g_activePoses[0];
+    const EyePose& b = g_activePoses[1];
+    const DisplayFov& d = g_display[eye ? 1 : 0];
+    if (!a.set || !b.set || !d.set || meters <= 0.01f) return 0.0f;
+    const float dx = a.pos[0] - b.pos[0], dy = a.pos[1] - b.pos[1], dz = a.pos[2] - b.pos[2];
+    const float k = (0.5f * sqrtf(dx * dx + dy * dy + dz * dz) / meters) * d.cropX * 2.0f / (d.tanR - d.tanL);
+    return eye ? -k : k;
+}
+
 void StereoPatchClip(float* m)
 {
     if (g_kKey[g_renderEye] != g_key) BuildK();
@@ -422,6 +452,67 @@ void StereoPatchClip(float* m)
     memcpy(&in, m, 64);
     Mat4 out = Mat4Mul(g_K[g_renderEye], in);
     memcpy(m, &out, 64);
+}
+
+bool StereoHasEyePoses()
+{
+    return g_activePoses[0].set && g_activePoses[1].set && g_display[0].set && g_display[1].set;
+}
+
+bool StereoProjectRefPoint(int eye, const float p[3], float* ox, float* oy)
+{
+    eye = eye ? 1 : 0;
+    const EyePose& e = g_activePoses[eye];
+    const DisplayFov& d = g_display[eye];
+    if (!e.set || !d.set) return false;
+    // Into the eye's frame (OpenXR: x right, y up, z back): d_e = R^T (p - pos).
+    float v[3] = { p[0] - e.pos[0], p[1] - e.pos[1], p[2] - e.pos[2] }, q[3];
+    for (int i = 0; i < 3; ++i) q[i] = e.rot[0 * 3 + i] * v[0] + e.rot[1 * 3 + i] * v[1] + e.rot[2 * 3 + i] * v[2];
+    if (q[2] > -0.01f) return false; // behind the eye
+    float tx = q[0] / -q[2], ty = q[1] / -q[2];
+    *ox = d.cropX * (2.0f * tx - (d.tanR + d.tanL)) / (d.tanR - d.tanL);
+    *oy = d.cropY * (2.0f * ty - (d.tanU + d.tanD)) / (d.tanU - d.tanD);
+    return true;
+}
+
+bool StereoRefPointToClip(int eye, const float p[3], float clip[4])
+{
+    eye = eye ? 1 : 0;
+    const EyePose& e = g_activePoses[eye];
+    const DisplayFov& d = g_display[eye];
+    if (!e.set || !d.set) return false;
+    float v[3] = { p[0] - e.pos[0], p[1] - e.pos[1], p[2] - e.pos[2] }, q[3];
+    for (int i = 0; i < 3; ++i) q[i] = e.rot[0 * 3 + i] * v[0] + e.rot[1 * 3 + i] * v[1] + e.rot[2 * 3 + i] * v[2];
+    const float zc = -q[2]; // distance ahead of the eye (may be <= 0: the GPU clips it)
+    const float sx = d.cropX * 2.0f / (d.tanR - d.tanL), ox = -d.cropX * (d.tanR + d.tanL) / (d.tanR - d.tanL);
+    const float sy = d.cropY * 2.0f / (d.tanU - d.tanD), oy = -d.cropY * (d.tanU + d.tanD) / (d.tanU - d.tanD);
+    clip[0] = sx * q[0] + ox * zc;
+    clip[1] = sy * q[1] + oy * zc;
+    clip[2] = 0.01f * zc; // just past the near plane: in front of everything, clipped behind the eye
+    clip[3] = zc;
+    return true;
+}
+
+bool StereoMapNdc(int eye, float x, float y, float* ox, float* oy)
+{
+    if (StereoPatchKey() == 0) return false;
+    eye = eye ? 1 : 0;
+    if (g_kKey[eye] != g_key)
+    {
+        int saved = g_renderEye;
+        g_renderEye = eye;
+        BuildK();
+        g_renderEye = saved;
+    }
+    // A far point (NDC depth ~1) on the game's screen at (x, y): c' = K c.
+    const float c[4] = { x, y, 0.999f, 1.0f };
+    float o[4] = {};
+    for (int i = 0; i < 4; ++i)
+        for (int k = 0; k < 4; ++k) o[i] += g_K[eye].m[i][k] * c[k];
+    if (o[3] <= 1e-6f) return false;
+    *ox = o[0] / o[3];
+    *oy = o[1] / o[3];
+    return true;
 }
 
 void StereoPatchView(float* m)
@@ -437,5 +528,64 @@ bool StereoWorldEyeOffset(float out[3])
     if (!g_cfg.shiftEyePosition || StereoPatchKey() == 0) return false;
     if (g_kKey[g_renderEye] != g_key) BuildK();
     memcpy(out, g_eyeWorld[g_renderEye], sizeof(g_eyeWorld[g_renderEye]));
+    return true;
+}
+
+int StereoRenderEye() { return g_renderEye; }
+
+bool StereoEyeRays(int eye, const float O[3], const float U[3], const float V[3], const float E[3],
+                   float O2[3], float U2[3], float V2[3], float E2[3])
+{
+    if (StereoPatchKey() == 0) return false;
+    eye = eye ? 1 : 0;
+    if (g_kKey[eye] != g_key)
+    {
+        int saved = g_renderEye;
+        g_renderEye = eye;
+        BuildK();
+        g_renderEye = saved;
+    }
+    // The game's ray for screen NDC (x, y): O + (1-ux) U + (1-uy) V with
+    // u = (ndc + 1) / 2, i.e. A + x Bx + y By, the world vector per unit of
+    // view depth: M (x / xs, y / ys, 1) with M = the camera's canonical axes.
+    float M[3][3]; // columns: right, up, forward (world)
+    for (int k = 0; k < 3; ++k)
+    {
+        M[k][0] = -0.5f * U[k] * g_xs;
+        M[k][1] = -0.5f * V[k] * g_ys;
+        M[k][2] = O[k] + 0.5f * U[k] + 0.5f * V[k];
+    }
+    // The eye's ray for its NDC (x', y'): eye canonical q = ((x'-ox)/sx, (y'-oy)/sy, 1),
+    // in the game's canonical axes c = Rt^T q, in world M c.
+    const float* R = g_tRot[eye];
+    const float sx = g_pnXY[eye][0], ox = g_pnXY[eye][1], sy = g_pnXY[eye][2], oy = g_pnXY[eye][3];
+    if (fabsf(sx) < 1e-6f || fabsf(sy) < 1e-6f) return false;
+    const float qa[3] = { -ox / sx, -oy / sy, 1.0f }, qx[3] = { 1.0f / sx, 0, 0 }, qy[3] = { 0, 1.0f / sy, 0 };
+    auto toWorld = [&](const float q[3], float out[3]) {
+        float c[3];
+        for (int j = 0; j < 3; ++j) c[j] = R[0 * 3 + j] * q[0] + R[1 * 3 + j] * q[1] + R[2 * 3 + j] * q[2];
+        for (int k = 0; k < 3; ++k) out[k] = M[k][0] * c[0] + M[k][1] * c[1] + M[k][2] * c[2];
+    };
+    float A2[3], Bx2[3], By2[3];
+    toWorld(qa, A2); toWorld(qx, Bx2); toWorld(qy, By2);
+    for (int k = 0; k < 3; ++k)
+    {
+        U2[k] = -2.0f * Bx2[k];
+        V2[k] = -2.0f * By2[k];
+        O2[k] = A2[k] + Bx2[k] + By2[k];
+        const float* e = g_eyeCanonPos[eye];
+        // Minus: measured. With the plus sign the shadow's disparity came out
+        // exactly mirrored (-59 px vs the feet's +59 px at a 10x eye distance);
+        // with minus it sits under the feet in both eyes, head straight or turned.
+        E2[k] = E[k] - (M[k][0] * e[0] + M[k][1] * e[1] + M[k][2] * e[2]);
+    }
+    return true;
+}
+
+bool StereoGameViewProj(float m[16], float fwd[3])
+{
+    if (!g_projKnown) return false;
+    memcpy(m, &g_lastVP, 64);
+    memcpy(fwd, g_fwd, sizeof(g_fwd));
     return true;
 }

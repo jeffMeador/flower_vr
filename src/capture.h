@@ -10,6 +10,7 @@ void InstallCaptureHooks(ID3D11Device* device, ID3D11DeviceContext* context);
 
 // Call once per Present to drive the periodic logging budget.
 void NotifyCaptureFrameBoundary();
+void CaptureSetBackbuffer(ID3D11Resource* backbuffer); // for the vrmod_uitrace diagnostic
 
 // Scene depth buffer of the last frame's 3D draws (left eye; the right eye's
 // is its shadow twin). AddRef'd, may be null.
@@ -18,3 +19,7 @@ ID3D11Resource* CaptureSceneDepth();
 // Batched double render: write the game's latest data back into a constant
 // buffer after the right eye's command list overwrote it.
 void CaptureRestoreOriginal(ID3D11DeviceContext* ctx, ID3D11Resource* buf);
+
+// Journey: the player's world position this frame (the character shaders'
+// localDudePos); false if not drawn recently.
+bool CapturePlayerPos(float out[3]);

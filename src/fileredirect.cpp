@@ -1,6 +1,8 @@
 #include "fileredirect.h"
 #include "log.h"
+#include "cinema.h"
 #include "terrain.h"
+#include "game.h"
 #include <MinHook.h>
 #include <cwchar>
 #include <cwctype>
@@ -8,9 +10,10 @@
 
 // File redirects, so the mod never has to modify the user's or the game's files:
 //
-//  - Documents\Flower\Flower.cfg (resolution, MSAA, ... shared with the non-VR
-//    Steam install) -> <game dir>\vrmod_Flower.cfg, if that file exists, so
-//    VR can use a square render resolution.
+//  - The game's settings file (resolution, MSAA, ...: Documents\Flower\Flower.cfg
+//    or AppData\Local\...\Journey\Steam\Journey.cfg, shared with non-VR play)
+//    -> <game dir>\vrmod_<game>.cfg, if that file exists, so VR can use a
+//    square render resolution.
 //  - Any game data file <...>\Data\<relative path> -> <game dir>\vrmod_overrides\
 //    <relative path>, if an override file exists there (e.g. a Scripts\
 //    MovieBarn.lua that turns the level movies off). Delete the folder to undo.
@@ -57,7 +60,30 @@ static HANDLE Redirected(const wchar_t* name, DWORD access, DWORD share, LPSECUR
     *handled = false;
     if (!name) return INVALID_HANDLE_VALUE;
     TerrainNotifyFileOpened(name); // remembers the level's heightmap
-    if (!g_cfgTarget.empty() && EndsWithI(name, L"\\Flower\\Flower.cfg"))
+    {
+        // Journey: which level is loading (Data\...\Level_<name>\...) - a
+        // new one after the main menu means Continue (a chapter start).
+        const wchar_t* lv = wcsstr(name, L"\\Level_");
+        if (!lv) lv = wcsstr(name, L"/Level_");
+        if (lv)
+        {
+            wchar_t level[64] = {};
+            const wchar_t* e = wcspbrk(lv + 1, L"\\/");
+            const size_t n = e ? (size_t)(e - lv - 1) : wcslen(lv + 1);
+            if (n < 63)
+            {
+                wcsncpy_s(level, lv + 1, n);
+                static wchar_t last[64] = {};
+                if (wcscmp(level, last))
+                {
+                    wcscpy_s(last, level);
+                    Log("[redirect] level %ls", level);
+                    CinemaNoteLevel(level);
+                }
+            }
+        }
+    }
+    if (!g_cfgTarget.empty() && EndsWithI(name, Game().settingsTail))
     {
         if (!g_loggedCfg) { g_loggedCfg = true; Log("[redirect] %ls -> %ls", name, g_cfgTarget.c_str()); }
         *handled = true;
@@ -100,12 +126,12 @@ static HANDLE WINAPI Hook_CreateFileA(LPCSTR name, DWORD access, DWORD share, LP
 
 bool FileRedirectInstall(const wchar_t* gameDir)
 {
-    std::wstring cfg = std::wstring(gameDir) + L"\\vrmod_Flower.cfg";
+    std::wstring cfg = std::wstring(gameDir) + L"\\" + Game().vrSettingsName;
     std::wstring dir = std::wstring(gameDir) + L"\\vrmod_overrides";
     bool haveCfg = GetFileAttributesW(cfg.c_str()) != INVALID_FILE_ATTRIBUTES;
     DWORD da = GetFileAttributesW(dir.c_str());
     bool haveDir = da != INVALID_FILE_ATTRIBUTES && (da & FILE_ATTRIBUTE_DIRECTORY);
-    if (haveCfg) g_cfgTarget = cfg; else Log("[redirect] no vrmod_Flower.cfg; using the normal settings file");
+    if (haveCfg) g_cfgTarget = cfg; else Log("[redirect] no %ls; using the normal settings file", Game().vrSettingsName.c_str());
     if (haveDir) { g_overrideDir = dir; Log("[redirect] data overrides from %ls", dir.c_str()); }
     std::wstring ini = std::wstring(gameDir) + L"\\vrmod.ini";
     g_cameraFlights = GetPrivateProfileIntW(L"xr", L"cameraFlights", 1, ini.c_str()) != 0;

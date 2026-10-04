@@ -1,3 +1,4 @@
+#include "game.h"
 #include "xr.h"
 #include "log.h"
 #include "keys.h"
@@ -12,6 +13,7 @@
 #include <d3d11_1.h>
 #include <d3dcompiler.h>
 #include "fakepad.h"
+#include "cinema.h"
 #include "capture.h"
 
 #define XR_USE_PLATFORM_WIN32
@@ -144,7 +146,7 @@ static bool CreateInstance()
 
     const char* exts[] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME, XR_KHR_COMPOSITION_LAYER_DEPTH_EXTENSION_NAME };
     XrInstanceCreateInfo ci{ XR_TYPE_INSTANCE_CREATE_INFO };
-    strcpy_s(ci.applicationInfo.applicationName, "Flower VRMod");
+    sprintf_s(ci.applicationInfo.applicationName, "%s VRMod", Game().nameA);
     strcpy_s(ci.applicationInfo.engineName, "PhyreEngine (injected)");
     ci.applicationInfo.apiVersion = XR_API_VERSION_1_0;
     ci.enabledExtensionCount = g_depthExt ? 2 : 1;
@@ -378,6 +380,7 @@ static XrPath g_hand[2] = {};
 static XrSpace g_aimSpace[2] = {};
 static bool g_inputReady = false;
 static bool g_motionSteering = true;
+static bool g_journey = false; // Journey: its own controller mapping (set at input setup)
 static bool g_invertStickY = true; // [xr] invertStickY
 static float g_pitchRest = 0.0f;    // sin of [xr] pitchRestDegrees: nose angle that means "straight" (negative = nose down)
 static float g_tiltFull = 0.7071f;  // sin of [xr] tiltTurnDegrees (45): roll for a full turn
@@ -426,6 +429,8 @@ static bool CreateInput()
     wchar_t mode[32];
     GetPrivateProfileStringW(L"xr", L"steering", L"motion", mode, 32, g_iniPath);
     g_motionSteering = _wcsicmp(mode, L"stick") != 0;
+    g_journey = !wcscmp(Game().name, L"Journey");
+    if (g_journey) Log("[xr] Journey controls: left stick walk, right stick turn, A/trigger jump, B/grip sing");
     g_invertStickY = GetPrivateProfileIntW(L"xr", L"invertStickY", 1, g_iniPath) != 0;
     {
         int deg = (int)GetPrivateProfileIntW(L"xr", L"tiltTurnDegrees", 45, g_iniPath);
@@ -443,7 +448,7 @@ static bool CreateInput()
 
     XrActionSetCreateInfo asci{ XR_TYPE_ACTION_SET_CREATE_INFO };
     strcpy_s(asci.actionSetName, "flower");
-    strcpy_s(asci.localizedActionSetName, "Flower");
+    strcpy_s(asci.localizedActionSetName, Game().nameA);
     XR_CHECK(xrCreateActionSet_(g_instance, &asci, &g_actionSet));
 
     g_actSteer = MakeAction("steer", "Steer (thumbstick)", XR_ACTION_TYPE_VECTOR2F_INPUT);
@@ -560,9 +565,15 @@ static void PollControllers(XrTime time)
     bool menu = false, toggle = false, recenter = false;
     XrPosef aim[2];
     bool aimOk[2] = {};
+    XrVector2f handStick[2] = {};
+    bool handB[2] = {};
+    float handGrip[2] = {};
     for (int h = 0; h < 2; ++h)
     {
         XrVector2f s = GetVec2(g_actSteer, h);
+        handStick[h] = s;
+        handB[h] = GetBool(g_actToggle, h);
+        handGrip[h] = GetFloat(g_actGrip, h);
         if (s.x * s.x + s.y * s.y > stickX * stickX + stickY * stickY) { stickX = s.x; stickY = s.y; }
         float t = GetFloat(g_actTrigger, h), g = GetFloat(g_actGrip, h);
         if (t > fly) fly = t;
@@ -585,6 +596,36 @@ static void PollControllers(XrTime time)
         aimOk[h] = XR_SUCCEEDED(xrLocateSpace_(g_aimSpace[h], g_localSpace, time, &loc)) &&
             (loc.locationFlags & XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT);
         aim[h] = loc.pose;
+    }
+
+    if (g_journey)
+    {
+        // Journey: walk on the ground, so plain gamepad controls; the head
+        // looks around. Left stick walks (forward = where the camera faces),
+        // right stick turns the camera; with one controller its stick walks.
+        // A / X / trigger = jump & fly (pad A), B / Y / grip = sing (pad B, hold
+        // for a longer call), menu = pause (pad START).
+        bool both = aimOk[0] && aimOk[1];
+        XrVector2f walk = both ? handStick[0] : (aimOk[0] ? handStick[0] : handStick[1]);
+        XrVector2f turn = both ? handStick[1] : XrVector2f{ 0, 0 };
+        float trig = 0;
+        for (int h = 0; h < 2; ++h) { float t = GetFloat(g_actTrigger, h); if (t > trig) trig = t; }
+        bool jump = GetBool(g_actFlyButton, 0) || GetBool(g_actFlyButton, 1) || trig > 0.5f;
+        bool sing = handB[0] || handB[1] || handGrip[0] > 0.5f || handGrip[1] > 0.5f;
+        if (recenter) CinemaToggle(); // thumbstick click: full VR <-> the game's view on a screen
+        WORD buttons = 0;
+        if (jump) buttons |= XINPUT_GAMEPAD_A;
+        if (sing) buttons |= XINPUT_GAMEPAD_B;
+        if (menu) buttons |= XINPUT_GAMEPAD_START;
+        static DWORD lastJDiag = 0;
+        if (GetTickCount() - lastJDiag > 3000)
+        {
+            lastJDiag = GetTickCount();
+            Log("[xr] journey pad: hands %d%d walk (%.2f %.2f) turn (%.2f %.2f) jump %d sing %d menu %d",
+                aimOk[0], aimOk[1], walk.x, walk.y, turn.x, turn.y, jump, sing, menu);
+        }
+        FakePadSetXR(walk.x, walk.y, buttons, 0, 0, turn.x, turn.y);
+        return;
     }
 
     if (toggle)
@@ -1152,6 +1193,34 @@ static void RunFrame(IDXGISwapChain* swapChain, int renderedEye)
             float ws = Stereo().worldScale;
             float camToMeters = 1.0f / (ws > 1e-4f ? ws : 1e-4f);
             XrQuaternionf refInv = QConj(g_ref.orientation);
+            // Debug: a fixed head turn on top of the tracked pose ([debug]
+            // fakeHeadYaw/Pitch/Roll, degrees), for testing with a headset
+            // that doesn't move (SteamVR's null driver).
+            static int fakeRead = 0;
+            static XrQuaternionf fake = { 0, 0, 0, 1 };
+            static bool useFake = false;
+            static float fakeA[3] = {}, fakeSpin = 0; // half-angles (rad); spin: yaw deg/s
+            if (!fakeRead)
+            {
+                fakeRead = 1;
+                wchar_t b[32];
+                float a[3];
+                const wchar_t* keys[3] = { L"fakeHeadYaw", L"fakeHeadPitch", L"fakeHeadRoll" };
+                for (int k = 0; k < 3; ++k) { GetPrivateProfileStringW(L"debug", keys[k], L"0", b, 32, g_iniPath); a[k] = (float)_wtof(b) * 0.0087266f; fakeA[k] = a[k]; }
+                GetPrivateProfileStringW(L"debug", L"fakeHeadSpin", L"0", b, 32, g_iniPath); fakeSpin = (float)_wtof(b);
+                XrQuaternionf qy = { 0, sinf(a[0]), 0, cosf(a[0]) }, qx = { sinf(a[1]), 0, 0, cosf(a[1]) }, qz = { 0, 0, sinf(a[2]), cosf(a[2]) };
+                fake = QMul(qy, QMul(qx, qz));
+                useFake = a[0] != 0 || a[1] != 0 || a[2] != 0 || fakeSpin != 0;
+                if (useFake) Log("[xr] DEBUG fake head turn: yaw %.0f pitch %.0f roll %.0f deg", a[0] / 0.0087266f, a[1] / 0.0087266f, a[2] / 0.0087266f);
+            }
+            if (useFake && fakeSpin != 0)
+            {
+                // Continuous turn (yaw), e.g. to see motion blur from head movement.
+                const float y = fakeA[0] + fakeSpin * 0.0087266f * (GetTickCount() % 360000) / 1000.0f;
+                XrQuaternionf qy = { 0, sinf(y), 0, cosf(y) }, qx = { sinf(fakeA[1]), 0, 0, cosf(fakeA[1]) }, qz = { 0, 0, sinf(fakeA[2]), cosf(fakeA[2]) };
+                fake = QMul(qy, QMul(qx, qz));
+            }
+            if (useFake) refInv = QMul(fake, refInv);
             for (int e = 0; e < 2; ++e)
             {
                 StereoSetDisplayFov(e, tanf(views[e].fov.angleLeft), tanf(views[e].fov.angleRight),
