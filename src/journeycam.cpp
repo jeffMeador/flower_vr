@@ -146,8 +146,11 @@ static void* __fastcall Hook_UpdateView(uint8_t* view)
     // subtle, in VR it's you being pulled back and forth. The distance to the
     // player is smoothed over g_steadyTau seconds (direction untouched).
     {
-        static float smooth = 0.0f;
+        static float smooth = 0.0f, lastCam[3] = {};
         static DWORD last = 0;
+        const float jx = m[12] - lastCam[0], jy = m[13] - lastCam[1], jz = m[14] - lastCam[2];
+        const bool cut = jx * jx + jy * jy + jz * jz > 9.0f; // the game camera jumped > 3 units
+        lastCam[0] = m[12]; lastCam[1] = m[13]; lastCam[2] = m[14];
         const DWORD now = GetTickCount();
         const float dt = last ? (now - last) * 0.001f : 0.0f;
         last = now;
@@ -158,7 +161,9 @@ static void* __fastcall Hook_UpdateView(uint8_t* view)
             const float d = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
             if (d > 0.01f)
             {
-                if (smooth <= 0.0f || dt > 0.5f || fabsf(d - smooth) > 0.5f * smooth) smooth = d; // cut or jump
+                // Only a real cut snaps; quick but continuous camera moves are
+                // followed smoothly (snapping on them looked like the camera jumping).
+                if (smooth <= 0.0f || dt > 0.5f || cut) smooth = d;
                 else smooth += (d - smooth) * (1.0f - expf(-dt / g_steadyTau));
                 const float k = smooth / d;
                 for (int i = 0; i < 3; ++i) m[12 + i] = c[i] + v[i] * k;
@@ -308,8 +313,8 @@ void JourneyCamTick(bool enable)
         // Camera cuts. The intro's last shots are close to the character
         // (within 4 units; every other shot is 30-190 away) - but so is the
         // end of the flight, which follows the falling star (you). The switch
-        // to full VR waits for a close cut that then holds still for half a
-        // second: the flight never does, the final shot of the character does.
+        // to full VR waits for a close cut that then holds still for a moment
+        // (20 frames): the flight never does, the final shot of the character does.
         static int stillFrames = -1; // -1: no close cut pending
         static float cutDist = 0.0f;
         if (g_camSpeed > 3.0f)
@@ -327,7 +332,7 @@ void JourneyCamTick(bool enable)
         else if (stillFrames >= 0)
         {
             if (g_camSpeed > 0.03f) stillFrames = 0;
-            else if (++stillFrames >= 45) { CinemaNoteCameraCut(cutDist, true); stillFrames = -1; }
+            else if (++stillFrames >= 20) { CinemaNoteCameraCut(cutDist, true); stillFrames = -1; }
         }
         memcpy(last, g_camPos, sizeof(last));
     }

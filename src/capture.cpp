@@ -81,7 +81,7 @@ struct PixelOverride
 {
     // Fixed: [psoverride] name=value from vrmod.ini. EyeRay: per-eye depth-to-world
     // rays (value: 0 prjPlaneOrigin, 1 prjPlaneU, 2 prjPlaneV, 3 eyePositionWS).
-    enum Kind { DepthOfField, Trails, Fixed, EyeRay } kind;
+    enum Kind { DepthOfField, Trails, Fixed, EyeRay, Scale } kind; // Scale: multiply by value
     UINT slot;
     UINT offset;
     float value;
@@ -107,8 +107,8 @@ static std::unordered_map<std::string, float> LoadFixedOverrides()
         // smeared the intro in VR: off by default ([stereo] journeyDof=1 keeps it).
         // The heat shimmer (heatScale) stays on; [stereo] heatShimmer=0 turns it off.
         if (!GetPrivateProfileIntW(L"stereo", L"journeyDof", 0, ini)) { m["nearscale"] = 0.0f; m["farscale"] = 0.0f; }
-        if (!GetPrivateProfileIntW(L"stereo", L"heatShimmer", 1, ini)) m["heatscale"] = 0.0f;
-        Log("[capture] Journey: depth of field %s, heat shimmer %s", m.count("farscale") ? "off" : "on", m.count("heatscale") ? "off" : "on");
+        // (its strength is scaled in Hook_CreatePixelShader)
+        Log("[capture] Journey: depth of field %s", m.count("farscale") ? "off" : "on");
     }
     wchar_t buf[4096] = {};
     DWORD n = GetPrivateProfileSectionW(L"psoverride", buf, 4096, ini);
@@ -349,6 +349,25 @@ static HRESULT STDMETHODCALLTYPE Hook_CreatePixelShader(ID3D11Device* self, cons
             if (fx != fixed.end())
                 ov.push_back({ PixelOverride::Fixed, bd.BindPoint, vd.StartOffset, fx->second });
             if (n == "alpha") g_psAlpha[*out] = { bd.BindPoint, vd.StartOffset };
+            if (n == "heatscale" && !wcscmp(Game().name, L"Journey"))
+            {
+                // Heat shimmer: the image is bent by a fraction of the screen,
+                // and each eye's image spans ~125 degrees instead of a monitor's
+                // ~45, so it bent nearly 3x as far (everything looked blurry).
+                // [stereo] heatShimmer scales it: 0 off, 1 the game's, default 0.3.
+                static float k = -1.0f;
+                if (k < 0.0f)
+                {
+                    extern wchar_t g_dllDir[MAX_PATH];
+                    wchar_t ini[MAX_PATH], buf[32];
+                    swprintf_s(ini, L"%s\\vrmod.ini", g_dllDir);
+                    GetPrivateProfileStringW(L"stereo", L"heatShimmer", L"0.3", buf, 32, ini);
+                    k = (float)_wtof(buf);
+                    if (k < 0.0f) k = 0.0f;
+                    Log("[capture] Journey heat shimmer x%.2f in VR", k);
+                }
+                ov.push_back({ PixelOverride::Scale, bd.BindPoint, vd.StartOffset, k });
+            }
             if (n == "localdudepos") g_psDude[*out] = { bd.BindPoint, vd.StartOffset };
             if (n == "blurzranges")
             {
@@ -732,6 +751,7 @@ static bool PixelOverrideValue(const PixelOverride& o, bool dofOff, bool dofScal
     float* f = reinterpret_cast<float*>(data.data() + o.offset);
     if (o.kind == PixelOverride::EyeRay) return false; // see ApplyEyeRays
     if (o.kind == PixelOverride::Fixed) { *f = o.value; return true; }
+    if (o.kind == PixelOverride::Scale) { *f *= o.value; return true; }
     if (o.kind == PixelOverride::Trails)
     {
         if (!trailsOff) return false;
@@ -1159,6 +1179,8 @@ static ID3D11VertexShader* GuiTitleVS(ID3D11DeviceContext* self)
 // along where the game camera looked, as big as the game's own (monitor) view
 // of it there; the logo is drawn on that plane per eye. It stays put when you
 // turn your head and barely moves as you walk, like a sign over the mountains.
+// Its depth stays at the front: GuiImage draws are depth tested, and at 300
+// units the sand hid the logo completely.
 static const float kTitleDist = 300.0f;
 static ID3D11VertexShader* GuiWorldVS(ID3D11DeviceContext* self)
 {
@@ -1177,7 +1199,7 @@ static ID3D11VertexShader* GuiWorldVS(ID3D11DeviceContext* self)
         "  float2 off = float2(i.p.x * a - cp.x * a, i.p.y - cp.y);\n"
         "  float2 np = float2(co * off.x - s * off.y, s * off.x + co * off.y);\n"
         "  float2 ndc = float2((cp.x * a + np.x) / a, cp.y + np.y);\n"
-        "  O o; o.p = mul(M, float4(ndc, 0, 1)); o.uv = i.uv; return o;\n"
+        "  O o; o.p = mul(M, float4(ndc, 0, 1)); o.p.z = 0; o.uv = i.uv; return o;\n"
         "}\n";
     ID3DBlob* b = nullptr, * err = nullptr;
     if (FAILED(D3DCompile(kSrc, sizeof(kSrc) - 1, "guiworld_vs", nullptr, nullptr, "main", "vs_5_0", 0, 0, &b, &err)))

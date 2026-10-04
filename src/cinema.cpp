@@ -5,6 +5,7 @@
 #include "log.h"
 #include "fakepad.h"
 #include <Windows.h>
+#include <d3dcompiler.h>
 
 static bool g_on = false;
 static wchar_t g_ini[MAX_PATH] = {};
@@ -20,25 +21,46 @@ static DXGI_FORMAT g_fmt = DXGI_FORMAT_UNKNOWN;
 static ID3D11Resource* g_rtvRes[2] = {};
 static ID3D11RenderTargetView* g_rtv[2] = {};
 
-// [xr] cinematicMode=auto (default): the screen for the title, menus, the
-// intro and other cutscenes, full VR while you play. The 2D layer (menu,
-// title cards) being drawn means "screen"; it stays on after that until you
-// have control: a tutorial prompt appears, or you walk (left stick) with no
-// 2D layer up. The thumbstick click overrides until the next automatic switch.
+// [xr] cinematicMode=auto (default): the cinema screen for the title and
+// menus, the intro until it hands over to you, and the idle screen; full VR
+// for everything else, cutscenes between levels included. Before the game
+// starts the 2D layer (menu, title) means "screen", latched until you have
+// control: the intro settles on the character, a tutorial prompt appears, or
+// you walk. In the game the 2D layer (pause menu) stays in VR as the menu sign.
+// The idle screen (the logo over a flight of far shots after a minute without
+// input) brings the screen back until you walk. Every switch fades through
+// white. The thumbstick click overrides until the next automatic switch.
 static bool g_auto = true;
-static bool g_latched = true;     // screen until control: set at launch and by the 2D layer
+static bool g_latched = true;     // before the game: screen until control
+static bool g_inGame = false;     // control was handed over once
+static bool g_idleScreen = false; // the idle screen is running
 static DWORD g_lastUi = 0;        // last 2D-layer draw (GetTickCount)
 static DWORD g_walkSince = 0;     // left stick held since
+static DWORD g_lastInput = 0;     // last left stick movement
 static int g_manual = -1;         // thumbstick override: -1 none, 0 VR, 1 screen
 static bool g_autoWant = true;
+// Fade through white: 0 clear .. 1 white; dir +1 fading out, -1 fading in.
+static float g_fade = 0.0f;
+static int g_fadeDir = 0;
+static bool g_fadeTo = false;     // the mode to switch to at full white
+static DWORD g_fadeTick = 0;
 
-void CinemaNoteUiLayer() { g_lastUi = GetTickCount(); g_latched = true; }
+static void HandOver(const char* why)
+{
+    if (!g_latched && g_inGame) return;
+    g_latched = false;
+    g_inGame = true;
+    Log("[cinema] %s: full VR", why);
+}
+
+void CinemaNoteUiLayer() { g_lastUi = GetTickCount(); if (!g_inGame) g_latched = true; }
 void CinemaNotePrompt()
 {
     // Not while a menu is up (its button glyphs are the same kind of image).
-    if (g_latched && (!g_lastUi || GetTickCount() - g_lastUi > 1000)) { g_latched = false; Log("[cinema] prompt seen: you have control"); }
+    if (g_latched && (!g_lastUi || GetTickCount() - g_lastUi > 1000)) HandOver("prompt seen");
 }
 
+static bool g_noIdleScreen = false;
 static DWORD g_lastTitle = 0; // a title card (the "JOURNEY" logo) was drawn
 
 void CinemaNoteTitle() { g_lastTitle = GetTickCount(); }
@@ -46,18 +68,17 @@ void CinemaNoteTitle() { g_lastTitle = GetTickCount(); }
 void CinemaNoteCameraCut(float distToPlayer, bool settled)
 {
     const DWORD now = GetTickCount();
-    // The idle screen: a flight of far shots with the logo over them -> the screen.
-    if (!settled && distToPlayer >= 4.0f && g_lastTitle && now - g_lastTitle < 3000)
+    // The idle screen: far shots with the logo over them, after a minute
+    // without input (the logo in play shows while you walk).
+    if (!settled && distToPlayer >= 4.0f && g_lastTitle && now - g_lastTitle < 3000 &&
+        g_lastInput && now - g_lastInput > 60000 && !g_idleScreen && !g_noIdleScreen)
     {
-        if (!g_latched) Log("[cinema] title over a camera flight (idle screen): screen");
-        CinemaNoteUiLayer();
+        g_idleScreen = true;
+        Log("[cinema] idle screen: screen");
         return;
     }
     if (settled && g_latched && distToPlayer < 4.0f && (!g_lastUi || now - g_lastUi > 1000))
-    {
-        g_latched = false;
-        Log("[cinema] settled on the player (%.1f units away): full VR", distToPlayer);
-    }
+        HandOver("settled on the player");
 }
 
 void CinemaInit(const wchar_t* ini)
@@ -66,6 +87,7 @@ void CinemaInit(const wchar_t* ini)
     wchar_t mode[32], buf[32];
     GetPrivateProfileStringW(L"xr", L"cinematicMode", L"auto", mode, 32, ini);
     g_auto = _wcsicmp(mode, L"screen") != 0 && _wcsicmp(mode, L"follow") != 0;
+    g_noIdleScreen = GetPrivateProfileIntW(L"debug", L"noIdleScreen", 0, ini) != 0; // tests: the idle screen in VR
     g_on = g_auto || _wcsicmp(mode, L"screen") == 0;
     GetPrivateProfileStringW(L"xr", L"cinemaDistance", L"2.5", buf, 32, ini); g_dist = (float)_wtof(buf);
     GetPrivateProfileStringW(L"xr", L"cinemaSize", L"3.0", buf, 32, ini); g_size = (float)_wtof(buf);
@@ -80,9 +102,9 @@ float CinemaAspect() { return g_aspect; }
 
 void CinemaToggle()
 {
+    if (g_auto) { g_manual = g_on ? 0 : 1; Log("[cinema] switching to %s (until the next automatic switch)", g_manual ? "screen" : "full VR"); return; }
     g_on = !g_on;
     StereoSetMono(g_on);
-    if (g_auto) { g_manual = g_on ? 1 : 0; Log("[cinema] switched to %s (until the next automatic switch)", g_on ? "screen" : "full VR"); return; }
     if (g_ini[0]) WritePrivateProfileStringW(L"xr", L"cinematicMode", g_on ? L"screen" : L"follow", g_ini);
     Log("[cinema] switched to %s", g_on ? "screen" : "follow (full VR)");
 }
@@ -92,21 +114,41 @@ void CinemaUpdate()
     if (!g_auto) return;
     const DWORD now = GetTickCount();
     const bool uiUp = g_lastUi && now - g_lastUi < 1000;
-    if (FakePadLeftStick() > 0.5f && !uiUp)
+    if (!g_lastInput) g_lastInput = now;
+    if (FakePadLeftStick() > 0.2f) g_lastInput = now;
+    if (FakePadLeftStick() > 0.5f && !(uiUp && !g_inGame))
     {
         if (!g_walkSince) g_walkSince = now;
-        if (now - g_walkSince > 500) g_latched = false;
+        if (now - g_walkSince > 500)
+        {
+            if (g_latched) HandOver("walking");
+            if (g_idleScreen) { g_idleScreen = false; Log("[cinema] idle screen over"); }
+        }
     }
     else g_walkSince = 0;
-    const bool want = uiUp || g_latched;
+    const bool want = (!g_inGame && (uiUp || g_latched)) || g_idleScreen;
     if (want != g_autoWant)
     {
         g_autoWant = want;
         g_manual = -1;
-        Log("[cinema] auto: %s", want ? "screen (menu, title or cutscene)" : "full VR (you have control)");
+        Log("[cinema] auto: %s", want ? "screen" : "full VR");
     }
-    const bool on = g_manual >= 0 ? g_manual == 1 : want;
-    if (on != g_on) { g_on = on; StereoSetMono(on); }
+    const bool target = g_manual >= 0 ? g_manual == 1 : want;
+
+    // Fade through white: out (0.25 s), switch at full white, back in (0.35 s).
+    const float dt = g_fadeTick ? (now - g_fadeTick) * 0.001f : 0.0f;
+    g_fadeTick = now;
+    if (g_fadeDir == 0 && target != g_on) { g_fadeDir = 1; g_fadeTo = target; }
+    if (g_fadeDir > 0)
+    {
+        g_fade += dt / 0.25f;
+        if (g_fade >= 1.0f) { g_fade = 1.0f; g_on = g_fadeTo; StereoSetMono(g_on); g_fadeDir = -1; }
+    }
+    else if (g_fadeDir < 0)
+    {
+        g_fade -= dt / 0.35f;
+        if (g_fade <= 0.0f) { g_fade = 0.0f; g_fadeDir = 0; }
+    }
 }
 
 static ID3D11RenderTargetView* EyeRtv(ID3D11Device* dev, int eye, ID3D11Resource* res)
@@ -118,9 +160,115 @@ static ID3D11RenderTargetView* EyeRtv(ID3D11Device* dev, int eye, ID3D11Resource
     return g_rtv[eye];
 }
 
+// The white of the fade: a full-screen triangle, blended.
+static ID3D11VertexShader* g_fadeVS = nullptr;
+static ID3D11PixelShader* g_fadePS = nullptr;
+static ID3D11Buffer* g_fadeCB = nullptr;
+static ID3D11BlendState* g_fadeBlend = nullptr;
+static bool g_fadeFailed = false;
+
+static bool FadeSetup(ID3D11Device* dev)
+{
+    if (g_fadePS) return true;
+    if (g_fadeFailed) return false;
+    g_fadeFailed = true;
+    static const char kVS[] = "float4 main(uint id : SV_VertexID) : SV_Position { float2 p = float2((id << 1) & 2, id & 2); return float4(p * 2 - 1, 0, 1); }";
+    static const char kPS[] = "cbuffer F : register(b0) { float4 c; }; float4 main() : SV_Target { return c; }";
+    ID3DBlob* vb = nullptr, * pb = nullptr;
+    if (FAILED(D3DCompile(kVS, sizeof(kVS) - 1, "fade_vs", nullptr, nullptr, "main", "vs_4_0", 0, 0, &vb, nullptr)) ||
+        FAILED(D3DCompile(kPS, sizeof(kPS) - 1, "fade_ps", nullptr, nullptr, "main", "ps_4_0", 0, 0, &pb, nullptr)))
+    {
+        if (vb) vb->Release();
+        Log("[cinema] fade shaders failed to compile");
+        return false;
+    }
+    bool ok = SUCCEEDED(dev->CreateVertexShader(vb->GetBufferPointer(), vb->GetBufferSize(), nullptr, &g_fadeVS)) &&
+              SUCCEEDED(dev->CreatePixelShader(pb->GetBufferPointer(), pb->GetBufferSize(), nullptr, &g_fadePS));
+    vb->Release(); pb->Release();
+    D3D11_BUFFER_DESC bd = {}; bd.ByteWidth = 16; bd.Usage = D3D11_USAGE_DEFAULT; bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    ok = ok && SUCCEEDED(dev->CreateBuffer(&bd, nullptr, &g_fadeCB));
+    D3D11_BLEND_DESC bl = {};
+    bl.RenderTarget[0].BlendEnable = TRUE;
+    bl.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA; bl.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA; bl.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bl.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE; bl.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO; bl.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bl.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    ok = ok && SUCCEEDED(dev->CreateBlendState(&bl, &g_fadeBlend));
+    if (!ok) { Log("[cinema] fade setup failed"); return false; }
+    g_fadeFailed = false;
+    return true;
+}
+
+static void DrawFade(ID3D11DeviceContext* ctx, ID3D11RenderTargetView* rtv, UINT w, UINT h)
+{
+    const float c[4] = { 1, 1, 1, g_fade };
+    ctx->UpdateSubresource(g_fadeCB, 0, nullptr, c, 0, 0);
+    D3D11_VIEWPORT vp = { 0, 0, (float)w, (float)h, 0, 1 };
+    ctx->OMSetRenderTargets(1, &rtv, nullptr);
+    ctx->RSSetViewports(1, &vp);
+    ctx->IASetInputLayout(nullptr);
+    ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ctx->VSSetShader(g_fadeVS, nullptr, 0);
+    ctx->PSSetShader(g_fadePS, nullptr, 0);
+    ctx->PSSetConstantBuffers(0, 1, &g_fadeCB);
+    ctx->OMSetBlendState(g_fadeBlend, nullptr, 0xFFFFFFFF);
+    ctx->Draw(3, 0);
+}
+
+static ID3D11RenderTargetView* EyeRtv(ID3D11Device* dev, int eye, ID3D11Resource* res);
+
+static void FadeOverlay(IDXGISwapChain* swapChain, ID3D11DeviceContext* ctx)
+{
+    if (g_fade <= 0.0f) return;
+    ID3D11Texture2D* bb = nullptr;
+    if (FAILED(swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb)) || !bb) return;
+    D3D11_TEXTURE2D_DESC d; bb->GetDesc(&d);
+    ID3D11Device* dev = nullptr; ctx->GetDevice(&dev);
+    if (FadeSetup(dev))
+    {
+        ID3D11RenderTargetView* oRtv = nullptr; ID3D11DepthStencilView* oDsv = nullptr; ctx->OMGetRenderTargets(1, &oRtv, &oDsv);
+        D3D11_VIEWPORT oVp = {}; UINT nvp = 1; ctx->RSGetViewports(&nvp, &oVp);
+        ID3D11InputLayout* oIl = nullptr; ctx->IAGetInputLayout(&oIl);
+        D3D11_PRIMITIVE_TOPOLOGY oTopo; ctx->IAGetPrimitiveTopology(&oTopo);
+        ID3D11VertexShader* oVs = nullptr; ctx->VSGetShader(&oVs, nullptr, nullptr);
+        ID3D11PixelShader* oPs = nullptr; ctx->PSGetShader(&oPs, nullptr, nullptr);
+        ID3D11Buffer* oCb = nullptr; ctx->PSGetConstantBuffers(0, 1, &oCb);
+        ID3D11BlendState* oBl = nullptr; float oF[4]; UINT oM = 0; ctx->OMGetBlendState(&oBl, oF, &oM);
+        ID3D11DepthStencilState* oDs = nullptr; UINT oRef = 0; ctx->OMGetDepthStencilState(&oDs, &oRef);
+        ctx->OMSetDepthStencilState(nullptr, 0);
+        for (int eye = 0; eye < 2; ++eye)
+        {
+            ID3D11Resource* target = eye == 0 ? (ID3D11Resource*)bb : ShadowOfResource(bb);
+            if (!target) continue;
+            if (ID3D11RenderTargetView* rtv = EyeRtv(dev, eye, target)) DrawFade(ctx, rtv, d.Width, d.Height);
+            if (eye == 1) target->Release();
+        }
+        ctx->OMSetRenderTargets(1, &oRtv, oDsv);
+        ctx->RSSetViewports(1, &oVp);
+        ctx->IASetInputLayout(oIl);
+        ctx->IASetPrimitiveTopology(oTopo);
+        ctx->VSSetShader(oVs, nullptr, 0);
+        ctx->PSSetShader(oPs, nullptr, 0);
+        ctx->PSSetConstantBuffers(0, 1, &oCb);
+        ctx->OMSetBlendState(oBl, oF, oM);
+        ctx->OMSetDepthStencilState(oDs, oRef);
+        IUnknown* olds[] = { oRtv, oDsv, oIl, oVs, oPs, oCb, oBl, oDs };
+        for (IUnknown* u : olds) if (u) u->Release();
+    }
+    dev->Release();
+    bb->Release();
+}
+
+static void ComposeScreen(IDXGISwapChain* swapChain, ID3D11DeviceContext* ctx);
+
 void CinemaCompose(IDXGISwapChain* swapChain, ID3D11DeviceContext* ctx)
 {
-    if (!g_on || !ctx || !StereoHasEyePoses()) return;
+    if (!ctx) return;
+    if (g_on && StereoHasEyePoses()) ComposeScreen(swapChain, ctx);
+    FadeOverlay(swapChain, ctx);
+}
+
+static void ComposeScreen(IDXGISwapChain* swapChain, ID3D11DeviceContext* ctx)
+{
     ID3D11Texture2D* bb = nullptr;
     if (FAILED(swapChain->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb)) || !bb) return;
     D3D11_TEXTURE2D_DESC d;
