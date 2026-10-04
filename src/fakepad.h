@@ -11,3 +11,5 @@ void FakePadSetXR(float lx, float ly, WORD buttons, BYTE lt, BYTE rt, float rx =
 
 // How far the left stick was pushed (0..1) when the game last read the pad.
 float FakePadLeftStick();
+// When the game last saw START (the pause button) held, GetTickCount; 0 never.
+DWORD FakePadLastStart();

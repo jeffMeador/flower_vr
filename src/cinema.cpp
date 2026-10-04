@@ -26,7 +26,8 @@ static ID3D11RenderTargetView* g_rtv[2] = {};
 // for everything else, cutscenes between levels included. Before the game
 // starts the 2D layer (menu, title) means "screen", latched until you have
 // control: the intro settles on the character, a tutorial prompt appears, or
-// you walk. In the game the 2D layer (pause menu) stays in VR as the menu sign.
+// you walk; Continue (a level load after the menu) hands over at once, so
+// chapter intros are in VR. In the game the pause menu takes the screen while up.
 // The idle screen (the logo over a flight of far shots after a minute without
 // input) brings the screen back until you walk. Every switch fades through
 // white. The thumbstick click overrides until the next automatic switch.
@@ -54,6 +55,16 @@ static void HandOver(const char* why)
 }
 
 void CinemaNoteUiLayer() { g_lastUi = GetTickCount(); if (!g_inGame) g_latched = true; }
+
+// A level started loading. The title menu runs inside the first level, so
+// Start (the opening intro) loads none; Continue loads your chapter's level,
+// whose intro stays in full VR.
+void CinemaNoteLevel(const wchar_t* level)
+{
+    static wchar_t first[64] = {}; // the level the title menu runs in
+    if (!first[0]) { wcscpy_s(first, level); return; }
+    if (!g_inGame && _wcsicmp(level, first) != 0) HandOver("chapter start (Continue)");
+}
 void CinemaNotePrompt()
 {
     // Not while a menu is up (its button glyphs are the same kind of image).
@@ -61,9 +72,19 @@ void CinemaNotePrompt()
 }
 
 static bool g_noIdleScreen = false;
+static bool g_paused = false;     // Journey's pause screen is up
 static DWORD g_lastTitle = 0; // a title card (the "JOURNEY" logo) was drawn
 
-void CinemaNoteTitle() { g_lastTitle = GetTickCount(); }
+// Journey's pause: the camera cuts to a scenic shot with the logo, no menu
+// text. Logo shown within 3 s of the pause button = paused, until the logo
+// has been gone for a second.
+void CinemaNoteTitle()
+{
+    const DWORD now = GetTickCount();
+    g_lastTitle = now;
+    const DWORD start = FakePadLastStart();
+    if (!g_paused && g_inGame && start && now - start < 3000) { g_paused = true; Log("[cinema] paused: screen"); }
+}
 
 void CinemaNoteCameraCut(float distToPlayer, bool settled)
 {
@@ -71,7 +92,7 @@ void CinemaNoteCameraCut(float distToPlayer, bool settled)
     // The idle screen: far shots with the logo over them, after a minute
     // without input (the logo in play shows while you walk).
     if (!settled && distToPlayer >= 4.0f && g_lastTitle && now - g_lastTitle < 3000 &&
-        g_lastInput && now - g_lastInput > 60000 && !g_idleScreen && !g_noIdleScreen)
+        g_lastInput && now - g_lastInput > 60000 && !g_idleScreen && !g_noIdleScreen && !g_paused)
     {
         g_idleScreen = true;
         Log("[cinema] idle screen: screen");
@@ -115,7 +136,7 @@ void CinemaUpdate()
     const DWORD now = GetTickCount();
     const bool uiUp = g_lastUi && now - g_lastUi < 1000;
     if (!g_lastInput) g_lastInput = now;
-    if (FakePadLeftStick() > 0.2f) g_lastInput = now;
+    if (FakePadLeftStick() > 0.2f || (FakePadLastStart() && now - FakePadLastStart() < 100)) g_lastInput = now;
     if (FakePadLeftStick() > 0.5f && !(uiUp && !g_inGame))
     {
         if (!g_walkSince) g_walkSince = now;
@@ -126,7 +147,9 @@ void CinemaUpdate()
         }
     }
     else g_walkSince = 0;
-    const bool want = (!g_inGame && (uiUp || g_latched)) || g_idleScreen;
+    if (g_paused && (!g_lastTitle || now - g_lastTitle > 1000)) { g_paused = false; Log("[cinema] unpaused"); }
+    // Menus (the 2D layer) and the pause screen also take the screen while up.
+    const bool want = uiUp || (!g_inGame && g_latched) || g_idleScreen || g_paused;
     if (want != g_autoWant)
     {
         g_autoWant = want;

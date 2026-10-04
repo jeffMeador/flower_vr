@@ -22,6 +22,8 @@ void CinemaNotePrompt();
 void CinemaNoteCameraCut(float distToPlayer, bool settled);
 // A title card (the "JOURNEY" logo) was drawn this frame.
 void CinemaNoteTitle();
+// A game level started loading (Journey: Data\...\Level_<name>).
+void CinemaNoteLevel(const wchar_t* level);
 void CinemaUpdate();
 // Once per Present, before the eyes go to the headset: replaces both eye
 // images with the screen when cinema mode is on.

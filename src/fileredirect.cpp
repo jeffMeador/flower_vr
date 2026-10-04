@@ -1,5 +1,6 @@
 #include "fileredirect.h"
 #include "log.h"
+#include "cinema.h"
 #include "terrain.h"
 #include "game.h"
 #include <MinHook.h>
@@ -59,6 +60,29 @@ static HANDLE Redirected(const wchar_t* name, DWORD access, DWORD share, LPSECUR
     *handled = false;
     if (!name) return INVALID_HANDLE_VALUE;
     TerrainNotifyFileOpened(name); // remembers the level's heightmap
+    {
+        // Journey: which level is loading (Data\...\Level_<name>\...) - a
+        // new one after the main menu means Continue (a chapter start).
+        const wchar_t* lv = wcsstr(name, L"\\Level_");
+        if (!lv) lv = wcsstr(name, L"/Level_");
+        if (lv)
+        {
+            wchar_t level[64] = {};
+            const wchar_t* e = wcspbrk(lv + 1, L"\\/");
+            const size_t n = e ? (size_t)(e - lv - 1) : wcslen(lv + 1);
+            if (n < 63)
+            {
+                wcsncpy_s(level, lv + 1, n);
+                static wchar_t last[64] = {};
+                if (wcscmp(level, last))
+                {
+                    wcscpy_s(last, level);
+                    Log("[redirect] level %ls", level);
+                    CinemaNoteLevel(level);
+                }
+            }
+        }
+    }
     if (!g_cfgTarget.empty() && EndsWithI(name, Game().settingsTail))
     {
         if (!g_loggedCfg) { g_loggedCfg = true; Log("[redirect] %ls -> %ls", name, g_cfgTarget.c_str()); }
