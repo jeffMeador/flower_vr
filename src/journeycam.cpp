@@ -175,6 +175,7 @@ static void* __fastcall Hook_UpdateView(uint8_t* view)
         const bool distKnown = ppTime && GetTickCount() - ppTime < 1000;
         const float ex = w[8] - lastPP[0], ey = w[9] - lastPP[1], ez = w[10] - lastPP[2];
         const float dist = sqrtf(ex * ex + ey * ey + ez * ez);
+        if (cut) Log("[journeycam] camera cut: %.1f units from the character", dist);
         const bool hold = CinemaFrameCamera(mode, haveMode, dist, distKnown, cut);
         if (hold && haveHold && g_enabled) memcpy(w, holdW, sizeof(holdW));
         else { memcpy(holdW, w, sizeof(holdW)); haveHold = true; }

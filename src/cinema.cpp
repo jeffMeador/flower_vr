@@ -60,6 +60,9 @@ static void HandOver(const char* why)
 
 void CinemaNoteUiLayer() { g_lastUi = GetTickCount(); if (!g_inGame) g_latched = true; }
 
+static bool g_cutscene = false;     // a cutscene is running (see CinemaFrameCamera)
+static DWORD g_nearSince = 0;
+
 // A level started loading. The title menu runs inside the first level, so
 // Start (the opening intro) loads none; Continue loads your chapter's level,
 // whose intro stays in full VR.
@@ -67,7 +70,12 @@ void CinemaNoteLevel(const wchar_t* level)
 {
     static wchar_t first[64] = {}; // the level the title menu runs in
     if (!first[0]) { wcscpy_s(first, level); return; }
-    if (!g_inGame && _wcsicmp(level, first) != 0) HandOver("chapter start (Continue)");
+    if (!g_inGame && _wcsicmp(level, first) != 0)
+    {
+        HandOver("chapter start (Continue)");
+        g_cutscene = true; // its intro follows; ends when the camera settles on you
+        g_nearSince = 0;
+    }
 }
 void CinemaNotePrompt()
 {
@@ -110,11 +118,9 @@ void CinemaNoteCameraCut(float distToPlayer, bool settled)
 // Journey runs the camera (its director leaves "yours") or the camera cuts
 // far from the character (history scenes, far shots) = a cutscene, unless
 // you just paused or have been idle (pause and idle stay in VR, the logo
-// hidden). It ends when the director is back to yours with the camera near
-// the character for half a second.
+// hidden). It ends when the director is back to yours with the camera within
+// 8 units of the character for half a second (gameplay ~5; close intro shots ~12).
 static bool g_haveCamInfo = false;
-static bool g_cutscene = false;
-static DWORD g_nearSince = 0;
 
 static bool PauseOrIdle(DWORD now)
 {
@@ -138,7 +144,7 @@ bool CinemaFrameCamera(float mode, bool haveMode, float dist, bool distKnown, bo
             Log("[cinema] cutscene (%s, camera %.1f units from the character)", journeys ? "Journey runs the camera" : "cut far away", dist);
         }
     }
-    else if (!journeys && distKnown && dist < 12.0f)
+    else if (!journeys && distKnown && dist < 8.0f) // gameplay ~5; the last intro shot is ~12
     {
         if (!g_nearSince) g_nearSince = now;
         if (now - g_nearSince > 500) { g_cutscene = false; Log("[cinema] cutscene over"); }
@@ -150,12 +156,15 @@ bool CinemaFrameCamera(float mode, bool haveMode, float dist, bool distKnown, bo
     return g_auto && g_fadeDir == 1 && g_fadeTo && !g_on;
 }
 
+static bool g_toggleEnabled = false; // [debug] cinemaToggle=1: the thumbstick click switches
+
 void CinemaInit(const wchar_t* ini)
 {
     wcscpy_s(g_ini, ini);
     wchar_t mode[32], buf[32];
     GetPrivateProfileStringW(L"xr", L"cinematicMode", L"auto", mode, 32, ini);
     g_auto = _wcsicmp(mode, L"screen") != 0 && _wcsicmp(mode, L"follow") != 0;
+    g_toggleEnabled = GetPrivateProfileIntW(L"debug", L"cinemaToggle", 0, ini) != 0;
     g_noIdleScreen = GetPrivateProfileIntW(L"debug", L"noIdleScreen", 0, ini) != 0; // tests: the idle screen in VR
     g_on = g_auto || _wcsicmp(mode, L"screen") == 0;
     GetPrivateProfileStringW(L"xr", L"cinemaDistance", L"2.5", buf, 32, ini); g_dist = (float)_wtof(buf);
@@ -167,10 +176,12 @@ void CinemaInit(const wchar_t* ini)
 }
 
 bool CinemaActive() { return g_on; }
+bool CinemaInGame() { return g_inGame; }
 float CinemaAspect() { return g_aspect; }
 
 void CinemaToggle()
 {
+    if (!g_toggleEnabled) return;
     if (g_auto) { g_manual = g_on ? 0 : 1; Log("[cinema] switching to %s (until the next automatic switch)", g_manual ? "screen" : "full VR"); return; }
     g_on = !g_on;
     StereoSetMono(g_on);
@@ -187,7 +198,7 @@ void CinemaUpdate()
             wchar_t path[MAX_PATH];
             wcscpy_s(path, g_ini);
             if (wchar_t* slash = wcsrchr(path, L'\\')) { slash[1] = 0; wcscat_s(path, L"vrmod_cinema"); }
-            if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES && DeleteFileW(path)) CinemaToggle();
+            if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES && DeleteFileW(path)) { const bool e = g_toggleEnabled; g_toggleEnabled = true; CinemaToggle(); g_toggleEnabled = e; }
         }
     }
     if (!g_auto) return;
@@ -212,9 +223,9 @@ void CinemaUpdate()
     // Journey: the per-frame cutscene state decides (pause and idle stay in VR).
     if (g_haveCamInfo)
     {
-        want = g_cutscene || (uiUp && !g_inGame);
-        if (!g_cutscene && g_latched && g_inGame) g_latched = false;
-        if (!g_cutscene && !uiUp && g_latched) HandOver("camera handed to you");
+        want = g_inGame ? g_cutscene : true;
+        // Before the game starts (title, menu) the screen stays up: Start and
+        // Continue hand over (the intro settling on the character, a level load).
     }
     if (want != g_autoWant)
     {

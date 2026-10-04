@@ -10,6 +10,8 @@
 // CinemaToggle switches at runtime (Journey: right thumbstick click).
 void CinemaInit(const wchar_t* ini);
 bool CinemaActive();
+// Past the title menu (control was handed to you once).
+bool CinemaInGame();
 float CinemaAspect(); // the screen's width / height
 void CinemaToggle();
 // Automatic mode inputs: the 2D layer (menu, title) was drawn / a tutorial

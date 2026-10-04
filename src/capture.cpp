@@ -1083,6 +1083,10 @@ static bool UiViewports(ID3D11DeviceContext* self, D3D11_VIEWPORT eyeVp[2], bool
     if (res) res->Release();
     rtv->Release();
     if (!swap || g_swapDraws++ == 0) return false; // the first one is the scene composite
+    // In the game Journey has no 2D menus (its pause screen is just the logo);
+    // camera-less full-screen draws there are effects (in the cave: a copy of
+    // the scene), which showed as a dark floating box on the menu sign.
+    if (CinemaInGame()) return false;
     // Draws with camera data are world-space quads (the intro's white fade,
     // glows, prompt icons placed in front of the camera): the stereo patch
     // already puts them right. Only camera-less draws (the 2D layer) move.
