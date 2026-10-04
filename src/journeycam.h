@@ -9,6 +9,9 @@ void JourneyCamTick(bool enable);
 float JourneyCamGameFov();
 // How far the scene camera moved last frame (game units); for debug captures.
 float JourneyCamSpeed();
+// Journey's camera director: mode (2 = you control the camera, else Journey: cutscene,
+// idle, pause, menu) and the blend back to your camera (0..1). False until found.
+bool JourneyCamDirector(float* mode, float* blend);
 // The game's own camera pose (not head-turned), world space: position and axes (z: forward or back).
 bool JourneyCamGamePose(float pos[3], float right[3], float up[3], float z[3]);
 // Cinema screen: widen the game's view to this aspect (0: off); the screen shows its middle band.

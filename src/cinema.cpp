@@ -4,7 +4,9 @@
 #include "uisign.h"
 #include "log.h"
 #include "fakepad.h"
+#include "journeycam.h"
 #include <Windows.h>
+#include <cmath>
 #include <d3dcompiler.h>
 
 static bool g_on = false;
@@ -31,6 +33,8 @@ static ID3D11RenderTargetView* g_rtv[2] = {};
 // The idle screen (the logo over a flight of far shots after a minute without
 // input) brings the screen back until you walk. Every switch fades through
 // white. The thumbstick click overrides until the next automatic switch.
+// Journey: once its camera director is found (journeycam), its mode decides
+// instead: Journey running the camera = the screen, you = full VR.
 static bool g_auto = true;
 static bool g_latched = true;     // before the game: screen until control
 static bool g_inGame = false;     // control was handed over once
@@ -149,7 +153,28 @@ void CinemaUpdate()
     else g_walkSince = 0;
     if (g_paused && (!g_lastTitle || now - g_lastTitle > 1000)) { g_paused = false; Log("[cinema] unpaused"); }
     // Menus (the 2D layer) and the pause screen also take the screen while up.
-    const bool want = uiUp || (!g_inGame && g_latched) || g_idleScreen || g_paused;
+    bool want = uiUp || (!g_inGame && g_latched) || g_idleScreen || g_paused;
+
+    // Journey's camera director, when found, decides alone: every time Journey
+    // runs the camera (cutscenes, intros, idle, pause, menu) it's the screen;
+    // when you control it (mode 2), full VR. Menus (the 2D layer) too.
+    float mode = 0.0f, blend = 0.0f;
+    if (JourneyCamDirector(&mode, &blend))
+    {
+        static int lastMode = -1;
+        static DWORD notYoursSince = 0;
+        // The value slides between 2 (yours) and 4 (Journey's) while the camera
+        // blends; above 3 for 0.3 s = Journey's, back under 2.5 = yours.
+        const int m = mode >= 3.0f ? 4 : mode <= 2.5f ? 2 : 3;
+        if (m != lastMode) { Log("[cinema] camera director %.2f (%s)", mode, m == 4 ? "Journey's" : m == 2 ? "yours" : "blending"); lastMode = m; }
+        static bool journeys = false;
+        if (mode >= 3.0f) { if (!notYoursSince) notYoursSince = now; if (now - notYoursSince > 300) journeys = true; }
+        else notYoursSince = 0;
+        if (mode <= 2.5f) journeys = false;
+        const bool cutscene = journeys;
+        want = cutscene || uiUp;
+        if (!want && g_latched) HandOver("camera handed to you");
+    }
     if (want != g_autoWant)
     {
         g_autoWant = want;
@@ -161,15 +186,24 @@ void CinemaUpdate()
     // Fade through white: out (0.25 s), switch at full white, back in (0.35 s).
     const float dt = g_fadeTick ? (now - g_fadeTick) * 0.001f : 0.0f;
     g_fadeTick = now;
+    // Fade through white: out (0.3 s), switch, hold white (1 s: the switch and
+    // Journey's camera blend happen unseen), back in (0.4 s).
+    static float hold = 0.0f;
     if (g_fadeDir == 0 && target != g_on) { g_fadeDir = 1; g_fadeTo = target; }
-    if (g_fadeDir > 0)
+    if (g_fadeDir == 1)
     {
-        g_fade += dt / 0.25f;
-        if (g_fade >= 1.0f) { g_fade = 1.0f; g_on = g_fadeTo; StereoSetMono(g_on); g_fadeDir = -1; }
+        g_fade += dt / 0.3f;
+        if (g_fade >= 1.0f) { g_fade = 1.0f; g_on = g_fadeTo; StereoSetMono(g_on); g_fadeDir = 2; hold = 0.0f; }
+    }
+    else if (g_fadeDir == 2)
+    {
+        hold += dt;
+        if (target != g_on) { g_on = target; StereoSetMono(g_on); hold = 0.0f; } // changed its mind: still white
+        if (hold >= 1.0f) g_fadeDir = -1;
     }
     else if (g_fadeDir < 0)
     {
-        g_fade -= dt / 0.35f;
+        g_fade -= dt / 0.4f;
         if (g_fade <= 0.0f) { g_fade = 0.0f; g_fadeDir = 0; }
     }
 }

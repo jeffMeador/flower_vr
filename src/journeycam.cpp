@@ -69,6 +69,19 @@ static float g_steadyTau = 3.0f;  // [xr] cameraSteady: seconds to smooth the ca
 static bool g_localTurn = true;   // [debug] localTurn=0: leave the camera's local transform and FOV alone (A/B test)
 static bool g_noPassHook = false; // [debug] noPassHook=1: leave pass setup alone (A/B test)
 
+// The camera director: CameraDirector::Apply (0x84460, rcx = director) writes
+// its camera's local transform from it each frame; director + 0x30 is the
+// camera. Its mode at +0x78 is 2 while you control the camera and something
+// else (4 in intros) while Journey runs it (cutscenes, idle, pause, menu);
+// +0x88 blends 0 -> 1 back to your camera after a cutscene. Found by diffing
+// memory between a chapter intro and play.
+static const uintptr_t kDirectorRva = 0x84460;
+static const uint8_t kDirectorBytes[] = { 0x40, 0x53, 0x48, 0x83, 0xEC, 0x60, 0x4C, 0x8D, 0x41, 0x60, 0x48, 0x8B,
+                                          0xD9, 0x48, 0x8D, 0x51, 0x50, 0x48, 0x8D, 0x4C, 0x24, 0x20 };
+using Director_t = void*(__fastcall*)(uint8_t* director);
+static Director_t realDirector;
+static uint8_t* volatile g_director = nullptr;
+
 using UpdateProj_t = void*(__fastcall*)(uint8_t* cam);
 using SceneParams_t = void*(__fastcall*)(void* out, uint8_t* cam, void* a3, void* a4);
 static UpdateProj_t realUpdateProj;
@@ -106,6 +119,16 @@ static void* __fastcall Hook_UpdateProj(uint8_t* cam)
     void* r = realUpdateProj(cam);
     if (!held) *fov = game;
     return r;
+}
+
+static void* __fastcall Hook_Director(uint8_t* director)
+{
+    if (director && g_sceneCam && *(uint8_t**)(director + 0x30) == g_sceneCam && g_director != director)
+    {
+        g_director = director;
+        Log("[journeycam] camera director %p", director);
+    }
+    return realDirector(director);
 }
 
 static void* __fastcall Hook_SceneParams(void* out, uint8_t* view, void* a3, void* a4)
@@ -267,6 +290,13 @@ bool JourneyCamInstall(float fovDegrees, bool headCamera)
               MH_CreateHook(base + kSceneParamsRva, (void*)&Hook_SceneParams, (void**)&realSceneParams) == MH_OK &&
               MH_EnableHook(base + kSceneParamsRva) == MH_OK;
     Log("[journeycam] camera hooks %s (fov %.0f deg in VR)", ok ? "installed" : "FAILED", g_fov);
+    if (ok)
+    {
+        const bool hd = Matches(kDirectorRva, kDirectorBytes, sizeof(kDirectorBytes)) &&
+                        MH_CreateHook(base + kDirectorRva, (void*)&Hook_Director, (void**)&realDirector) == MH_OK &&
+                        MH_EnableHook(base + kDirectorRva) == MH_OK;
+        Log("[journeycam] camera director hook %s", hd ? "installed" : "not installed (code not found)");
+    }
     if (ok && g_headCamera)
     {
         bool hv = Matches(kUpdateViewRva, kUpdateViewBytes, sizeof(kUpdateViewBytes)) &&
@@ -283,6 +313,14 @@ bool JourneyCamInstall(float fovDegrees, bool headCamera)
 
 float JourneyCamGameFov() { return g_gameFov; }
 float JourneyCamSpeed() { return g_camSpeed; }
+bool JourneyCamDirector(float* mode, float* blend)
+{
+    uint8_t* d = g_director;
+    if (!d) return false;
+    __try { *mode = *(float*)(d + 0x78); *blend = *(float*)(d + 0x88); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { g_director = nullptr; return false; }
+    return true;
+}
 bool JourneyCamGamePose(float pos[3], float right[3], float up[3], float z[3])
 {
     // The game's own camera (not head-turned): the world transform as UpdateView saw it.
