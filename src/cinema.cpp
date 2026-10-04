@@ -136,6 +136,16 @@ void CinemaToggle()
 
 void CinemaUpdate()
 {
+    {   // Tests: a file vrmod_cinema next to the DLL toggles like the thumbstick click.
+        static int tick = 0;
+        if (++tick % 30 == 0 && g_ini[0])
+        {
+            wchar_t path[MAX_PATH];
+            wcscpy_s(path, g_ini);
+            if (wchar_t* slash = wcsrchr(path, L'\\')) { slash[1] = 0; wcscat_s(path, L"vrmod_cinema"); }
+            if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES && DeleteFileW(path)) CinemaToggle();
+        }
+    }
     if (!g_auto) return;
     const DWORD now = GetTickCount();
     const bool uiUp = g_lastUi && now - g_lastUi < 1000;
