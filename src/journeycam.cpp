@@ -224,34 +224,11 @@ static void* __fastcall Hook_UpdateView(uint8_t* view)
     if (!StereoTakeHeadForCamera(m, R, t)) return realUpdateView(view);
     float e[3][3], pos[3];
     for (int i = 0; i < 3; ++i) { for (int k = 0; k < 3; ++k) e[i][k] = m[i * 4 + k]; pos[i] = m[12 + i]; }
-    // The head turns around the world's vertical, not the game camera's tilted
-    // axes: with the camera pitched (idle shots looking 45 degrees up a tower)
-    // turning your head swung the world around the tilted axis - not 1:1.
-    // L = the camera's level frame (its heading, world up); the game's pitch
-    // and roll (P = E L^T) stay on top, relative to your head: N = P R^T L.
-    float lv[3][3];
-    {
-        float hx = e[0][0], hz = e[0][2];
-        const float hl = sqrtf(hx * hx + hz * hz);
-        const float c[3] = { e[1][1] * e[2][2] - e[1][2] * e[2][1], e[1][2] * e[2][0] - e[1][0] * e[2][2], e[1][0] * e[2][1] - e[1][1] * e[2][0] };
-        const float hand = (e[0][0] * c[0] + e[0][1] * c[1] + e[0][2] * c[2]) >= 0.0f ? 1.0f : -1.0f; // x = hand * (y cross z)
-        if (hl > 1e-3f) { hx /= hl; hz /= hl; } else { hx = 1; hz = 0; }
-        lv[0][0] = hx; lv[0][1] = 0; lv[0][2] = hz;
-        lv[1][0] = 0; lv[1][1] = 1; lv[1][2] = 0;
-        // z = hand * (x cross y), y = (0,1,0): x cross y = (-x.z, 0, x.x)
-        lv[2][0] = -hand * hz; lv[2][1] = 0; lv[2][2] = hand * hx;
-    }
-    float P[3][3], Q[3][3], n[3][3], np[3];
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j)
-            P[i][j] = e[i][0] * lv[j][0] + e[i][1] * lv[j][1] + e[i][2] * lv[j][2];   // E L^T
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3; ++j)
-            Q[i][j] = P[i][0] * R[j * 3 + 0] + P[i][1] * R[j * 3 + 1] + P[i][2] * R[j * 3 + 2]; // P R^T
-    for (int i = 0; i < 3; ++i)
+    float n[3][3], np[3];
+    for (int j = 0; j < 3; ++j)
         for (int k = 0; k < 3; ++k)
-            n[i][k] = Q[i][0] * lv[0][k] + Q[i][1] * lv[1][k] + Q[i][2] * lv[2][k];   // (P R^T) L
-    for (int k = 0; k < 3; ++k) np[k] = pos[k] + lv[0][k] * t[0] + lv[1][k] * t[1] + lv[2][k] * t[2];
+            n[j][k] = e[0][k] * R[0 * 3 + j] + e[1][k] * R[1 * 3 + j] + e[2][k] * R[2 * 3 + j];
+    for (int k = 0; k < 3; ++k) np[k] = pos[k] + e[0][k] * t[0] + e[1][k] * t[1] + e[2][k] * t[2];
 
     float saved[12];
     memcpy(saved, w, sizeof(saved));
