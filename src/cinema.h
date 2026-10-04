@@ -24,6 +24,12 @@ void CinemaNoteCameraCut(float distToPlayer, bool settled);
 void CinemaNoteTitle();
 // A game level started loading (Journey: Data\...\Level_<name>).
 void CinemaNoteLevel(const wchar_t* level);
+// Journey, once per frame before it renders: its camera director mode, the
+// camera's distance to the character, whether the camera cut this frame.
+// True: hold the camera where it was (fading out to the cinema screen).
+bool CinemaFrameCamera(float mode, bool haveMode, float dist, bool distKnown, bool cut);
+// Pause or idle: the "JOURNEY" logo is hidden (it orbits with the camera).
+bool CinemaHideTitle();
 void CinemaUpdate();
 // Once per Present, before the eyes go to the headset: replaces both eye
 // images with the screen when cinema mode is on.

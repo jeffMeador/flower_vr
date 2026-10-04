@@ -158,7 +158,32 @@ static void* __fastcall Hook_UpdateView(uint8_t* view)
 {
     uint8_t* cam = view ? view - 0x10 : nullptr;
     float* w = view ? *(float**)(view + 0xB0) : nullptr;
-    if (cam == g_sceneCam && w) { g_camPos[0] = w[8]; g_camPos[1] = w[9]; g_camPos[2] = w[10]; g_camFwd[0] = w[4]; g_camFwd[1] = w[5]; g_camFwd[2] = w[6]; }
+    if (cam == g_sceneCam && w)
+    {
+        // Cutscene check before this frame renders; while the view fades out to
+        // the cinema screen the camera stays where it was (the cut isn't seen).
+        static float lastPos[3] = {}, holdW[12] = {};
+        static bool haveHold = false;
+        const float dx = w[8] - lastPos[0], dy = w[9] - lastPos[1], dz = w[10] - lastPos[2];
+        const bool cut = dx * dx + dy * dy + dz * dz > 9.0f;
+        lastPos[0] = w[8]; lastPos[1] = w[9]; lastPos[2] = w[10];
+        float mode = 0, blend = 0, pp[3];
+        const bool haveMode = JourneyCamDirector(&mode, &blend);
+        static float lastPP[3] = {};
+        static DWORD ppTime = 0;
+        if (CapturePlayerPos(pp)) { memcpy(lastPP, pp, sizeof(pp)); ppTime = GetTickCount(); }
+        const bool distKnown = ppTime && GetTickCount() - ppTime < 1000;
+        const float ex = w[8] - lastPP[0], ey = w[9] - lastPP[1], ez = w[10] - lastPP[2];
+        const float dist = sqrtf(ex * ex + ey * ey + ez * ez);
+        const bool hold = CinemaFrameCamera(mode, haveMode, dist, distKnown, cut);
+        if (hold && haveHold && g_enabled) memcpy(w, holdW, sizeof(holdW));
+        else { memcpy(holdW, w, sizeof(holdW)); haveHold = true; }
+        {
+            static DWORD lastLog = 0;
+            if (GetTickCount() - lastLog > 2000) { lastLog = GetTickCount(); Log("[journeycam] camera %.1f units from the character, director %.2f", dist, mode); }
+        }
+        g_camPos[0] = w[8]; g_camPos[1] = w[9]; g_camPos[2] = w[10]; g_camFwd[0] = w[4]; g_camFwd[1] = w[5]; g_camFwd[2] = w[6];
+    }
     if (!g_enabled || !g_headCamera || cam != g_sceneCam || !w) return realUpdateView(view);
 
     // Unpack to Flower's layout: rows right, up, z, position.

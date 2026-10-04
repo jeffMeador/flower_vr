@@ -1469,7 +1469,13 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
         {
             UINT tw, th; float ta;
             GuiImageInfo(self, tw, th, ta);
-            if (tw > 16 && th < 2 * tw && TitleWorldDraw(self, draw)) return; // a title (not a fade, not a prompt)
+            if (tw > 16 && th < 2 * tw)
+            {
+                // A title (not a fade, not a prompt): pinned in the world; hidden
+                // on the pause and idle screens (the camera orbits, it'd swing about).
+                if (CinemaHideTitle()) return;
+                if (TitleWorldDraw(self, draw)) return;
+            }
         }
     }
     D3D11_VIEWPORT giVp[2], giOrig;

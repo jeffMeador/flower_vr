@@ -87,7 +87,7 @@ void CinemaNoteTitle()
     const DWORD now = GetTickCount();
     g_lastTitle = now;
     const DWORD start = FakePadLastStart();
-    if (!g_paused && g_inGame && start && now - start < 3000) { g_paused = true; Log("[cinema] paused: screen"); }
+    if (!g_paused && g_inGame && start && now - start < 3000) { g_paused = true; Log("[cinema] paused"); }
 }
 
 void CinemaNoteCameraCut(float distToPlayer, bool settled)
@@ -99,11 +99,55 @@ void CinemaNoteCameraCut(float distToPlayer, bool settled)
         g_lastInput && now - g_lastInput > 60000 && !g_idleScreen && !g_noIdleScreen && !g_paused)
     {
         g_idleScreen = true;
-        Log("[cinema] idle screen: screen");
+        Log("[cinema] idle");
         return;
     }
     if (settled && g_latched && distToPlayer < 4.0f && (!g_lastUi || now - g_lastUi > 1000))
         HandOver("settled on the player");
+}
+
+// Cutscenes (Journey: decided per frame from the camera, before it renders).
+// Journey runs the camera (its director leaves "yours") or the camera cuts
+// far from the character (history scenes, far shots) = a cutscene, unless
+// you just paused or have been idle (pause and idle stay in VR, the logo
+// hidden). It ends when the director is back to yours with the camera near
+// the character for half a second.
+static bool g_haveCamInfo = false;
+static bool g_cutscene = false;
+static DWORD g_nearSince = 0;
+
+static bool PauseOrIdle(DWORD now)
+{
+    const DWORD start = FakePadLastStart();
+    return g_paused || (start && now - start < 2000) || (g_lastInput && now - g_lastInput > 55000);
+}
+
+bool CinemaHideTitle() { return PauseOrIdle(GetTickCount()); }
+
+bool CinemaFrameCamera(float mode, bool haveMode, float dist, bool distKnown, bool cut)
+{
+    const DWORD now = GetTickCount();
+    g_haveCamInfo = haveMode;
+    const bool journeys = haveMode && mode >= 2.05f;
+    if (!g_cutscene)
+    {
+        if (!PauseOrIdle(now) && g_inGame && (journeys || (cut && (!distKnown || dist > 20.0f))))
+        {
+            g_cutscene = true;
+            g_nearSince = 0;
+            Log("[cinema] cutscene (%s, camera %.1f units from the character)", journeys ? "Journey runs the camera" : "cut far away", dist);
+        }
+    }
+    else if (!journeys && distKnown && dist < 12.0f)
+    {
+        if (!g_nearSince) g_nearSince = now;
+        if (now - g_nearSince > 500) { g_cutscene = false; Log("[cinema] cutscene over"); }
+    }
+    else g_nearSince = 0;
+    // Start the fade out on this very frame, and keep the camera where it was
+    // while fading (the caller holds it): you never see the cut itself.
+    if (g_auto && g_manual < 0 && g_cutscene && !g_on && g_fadeDir == 0) { g_fadeDir = 1; g_fadeTo = true; }
+    return g_auto && g_fadeDir == 1 && g_fadeTo && !g_on;
 }
 
 void CinemaInit(const wchar_t* ini)
@@ -165,25 +209,12 @@ void CinemaUpdate()
     // Menus (the 2D layer) and the pause screen also take the screen while up.
     bool want = uiUp || (!g_inGame && g_latched) || g_idleScreen || g_paused;
 
-    // Journey's camera director, when found, decides alone: every time Journey
-    // runs the camera (cutscenes, intros, idle, pause, menu) it's the screen;
-    // when you control it (mode 2), full VR. Menus (the 2D layer) too.
-    float mode = 0.0f, blend = 0.0f;
-    if (JourneyCamDirector(&mode, &blend))
+    // Journey: the per-frame cutscene state decides (pause and idle stay in VR).
+    if (g_haveCamInfo)
     {
-        static int lastMode = -1;
-        static DWORD notYoursSince = 0;
-        // The value slides between 2 (yours) and 4 (Journey's) while the camera
-        // blends; above 3 for 0.3 s = Journey's, back under 2.5 = yours.
-        const int m = mode >= 3.0f ? 4 : mode <= 2.5f ? 2 : 3;
-        if (m != lastMode) { Log("[cinema] camera director %.2f (%s)", mode, m == 4 ? "Journey's" : m == 2 ? "yours" : "blending"); lastMode = m; }
-        static bool journeys = false;
-        if (mode >= 3.0f) { if (!notYoursSince) notYoursSince = now; if (now - notYoursSince > 300) journeys = true; }
-        else notYoursSince = 0;
-        if (mode <= 2.5f) journeys = false;
-        const bool cutscene = journeys;
-        want = cutscene || uiUp;
-        if (!want && g_latched) HandOver("camera handed to you");
+        want = g_cutscene || (uiUp && !g_inGame);
+        if (!g_cutscene && g_latched && g_inGame) g_latched = false;
+        if (!g_cutscene && !uiUp && g_latched) HandOver("camera handed to you");
     }
     if (want != g_autoWant)
     {
@@ -200,6 +231,7 @@ void CinemaUpdate()
     // Journey's camera blend happen unseen), back in (0.4 s).
     static float hold = 0.0f;
     if (g_fadeDir == 0 && target != g_on) { g_fadeDir = 1; g_fadeTo = target; }
+    if (g_fadeDir == 1 && target == g_on) g_fadeDir = -1; // called off before the switch: fade back in
     if (g_fadeDir == 1)
     {
         g_fade += dt / 0.3f;
