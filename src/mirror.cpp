@@ -15,6 +15,7 @@ static ID3D11DeviceContext* g_def = nullptr;
 static bool g_active = false;
 static bool g_outputsValid = false;
 static bool g_work = false; // anything but state recorded since the last flush
+static bool g_copyAll = false; // [debug] mirrorCopyAll=1: forward every dynamic geometry write to the right eye
 static std::unordered_map<ID3D11Resource*, UINT> g_forwardMaps; // mapped dynamic buffers -> size
 static std::unordered_map<UINT, uint64_t> g_fwdBySize; // forwarded writes per buffer size since the last stats line (logged: the costliest)
 // Buffers whose last write on the deferred context was ours (patched right-eye
@@ -274,7 +275,7 @@ void MirrorBeforeMap(ID3D11Resource* r, D3D11_MAP type)
         if (d.Usage == D3D11_USAGE_DYNAMIC)
         {
             bool geometryOnly = !(d.BindFlags & ~(D3D11_BIND_VERTEX_BUFFER | D3D11_BIND_INDEX_BUFFER));
-            if (geometryOnly && !g_copyAlways.count(r) && !g_ourWrites.count(r))
+            if (geometryOnly && !g_copyAll && !g_copyAlways.count(r) && !g_ourWrites.count(r))
             {
                 if (!g_usedSinceFlush.count(r)) { g_statUncopied++; return; }
                 g_copyAlways.insert(r); // rewritten after a recorded draw used it
@@ -463,6 +464,8 @@ void MirrorLogStats()
 
 void MirrorInstall(ID3D11Device* dev, ID3D11DeviceContext* imm, const wchar_t* ini)
 {
+    g_copyAll = GetPrivateProfileIntW(L"debug", L"mirrorCopyAll", 0, ini) != 0;
+    if (g_copyAll) Log("[mirror] DEBUG forwarding every dynamic geometry write");
     if (!GetPrivateProfileIntW(L"stereo", L"batch", 1, ini))
     {
         Log("[mirror] off ([stereo] batch=0): per-draw double render");

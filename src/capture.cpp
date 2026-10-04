@@ -3,6 +3,7 @@
 #include "mat4.h"
 #include "stereo.h"
 #include "cinema.h"
+#include "xr.h"
 #include "shadow.h"
 #include "mirror.h"
 #include "vhook.h"
@@ -1307,11 +1308,35 @@ static bool TitleWorldDraw(ID3D11DeviceContext* self, F&& draw)
     return true;
 }
 
+// GuiImages that are full-screen effects, drawn as the game does in both eyes:
+// fades (a tiny solid texture) and copies of a rendered frame (the texture is
+// a render target - in the cave a darkened copy of the scene, which got pinned
+// in the world as a square "title" before).
+static bool GuiImageIsRenderTarget(ID3D11DeviceContext* self)
+{
+    bool rt = false;
+    ID3D11ShaderResourceView* srv = nullptr;
+    self->PSGetShaderResources(0, 1, &srv);
+    if (srv)
+    {
+        ID3D11Resource* r = nullptr;
+        srv->GetResource(&r);
+        D3D11_RESOURCE_DIMENSION dim;
+        if (r) { r->GetType(&dim); if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) { D3D11_TEXTURE2D_DESC td; static_cast<ID3D11Texture2D*>(r)->GetDesc(&td); rt = (td.BindFlags & D3D11_BIND_RENDER_TARGET) != 0; } r->Release(); }
+        srv->Release();
+    }
+    return rt;
+}
 static bool IsScreenFill(ID3D11DeviceContext* self)
 {
     UINT w, h; float alpha;
     GuiImageInfo(self, w, h, alpha);
-    return w > 0 && w <= 16 && h <= 16;
+    return (w > 0 && w <= 16 && h <= 16) || GuiImageIsRenderTarget(self);
+}
+// The "JOURNEY" logo: a wide image (1024x256), not a render target.
+static bool IsTitleImage(ID3D11DeviceContext* self, UINT w, UINT h)
+{
+    return w > 16 && w >= 3 * h && !GuiImageIsRenderTarget(self);
 }
 
 static bool GuiImageViewports(ID3D11DeviceContext* self, D3D11_VIEWPORT vp[2], D3D11_VIEWPORT& orig)
@@ -1408,7 +1433,7 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
             if (w > 16 && alpha > 0.05f)
             {
                 if (h >= 2 * w) CinemaNotePrompt();
-                else CinemaNoteTitle();
+                else if (IsTitleImage(self, w, h)) CinemaNoteTitle();
             }
         }
         else
@@ -1473,12 +1498,33 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
         {
             UINT tw, th; float ta;
             GuiImageInfo(self, tw, th, ta);
-            if (tw > 16 && th < 2 * tw)
+            if (IsTitleImage(self, tw, th))
             {
                 // A title (not a fade, not a prompt): pinned in the world; hidden
                 // on the pause and idle screens (the camera orbits, it'd swing about).
                 if (CinemaHideTitle()) return;
                 if (TitleWorldDraw(self, draw)) return;
+            }
+        }
+    }
+    if (!ShadowBypassed() && XrSessionActive() && g_backbuffer && !wcscmp(Game().name, L"Journey"))
+    {
+        // In the headset Journey's 2D images are drawn only if they're a tutorial
+        // prompt (a tall strip of button pictures), the JOURNEY title (a wide
+        // image) or a fade (a tiny solid texture). Anything else - the cave's
+        // vignette, sized for a 45 degree screen, showed as a dark floating box -
+        // is left out: a vignette is a dark frame stuck to your view in VR.
+        auto o = g_offsets.find(g_contextState[self].currentVS);
+        if (o != g_offsets.end() && o->second.guiImage)
+        {
+            UINT w, h; float alpha;
+            GuiImageInfo(self, w, h, alpha);
+            const bool fade = w > 0 && w <= 16 && h <= 16, prompt = w > 16 && h >= 2 * w, title = w > 16 && w >= 3 * h;
+            if (!fade && !prompt && !title)
+            {
+                static std::unordered_set<uint64_t> logged;
+                if (logged.insert(((uint64_t)w << 32) | h).second) Log("[gui] hidden in the headset: a %ux%u image (vignette or other screen overlay)", w, h);
+                return;
             }
         }
     }
@@ -1506,7 +1552,7 @@ static void StereoDraw(ID3D11DeviceContext* self, F&& draw, UINT count = 0)
                 giCinema = true;
                 UINT tw, th; float ta;
                 GuiImageInfo(self, tw, th, ta);
-                giTitle = th < 2 * tw; // not a prompt (those come from a tall strip of button pictures)
+                giTitle = IsTitleImage(self, tw, th);
             }
         }
     }
